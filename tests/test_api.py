@@ -1,5 +1,9 @@
 import asyncio
+import os
+import sys
 import httpx
+
+sys.path.insert(0, os.path.abspath("."))
 
 async def test_api_endpoints():
     print("Testing REST API & Server routes...")

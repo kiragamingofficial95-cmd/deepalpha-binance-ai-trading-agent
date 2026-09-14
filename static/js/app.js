@@ -341,37 +341,93 @@ class DashboardApp {
     renderOpenPositions(openTrades) {
         const container = document.getElementById("openPositionsTable");
         const countBadge = document.getElementById("openPositionsCount");
+        const livePnlBadge = document.getElementById("openPositionsLivePnlBadge");
+        const headerLivePnl = document.getElementById("statLiveUnrealizedPnl");
+
         if (countBadge) countBadge.innerText = openTrades.length;
 
         if (!container) return;
 
         if (openTrades.length === 0) {
-            container.innerHTML = `<tr><td colspan="7" class="text-center py-6 text-gray-500 text-xs">No active positions open right now. Engine is scanning.</td></tr>`;
+            container.innerHTML = `<tr><td colspan="9" class="text-center py-6 text-gray-500 text-xs">No active positions open right now. Engine is scanning.</td></tr>`;
+            if (livePnlBadge) livePnlBadge.innerText = "Live PnL: $0.00";
+            if (headerLivePnl) {
+                headerLivePnl.innerText = "$0.00 (0.00%)";
+                headerLivePnl.className = "font-mono font-bold text-gray-300 text-sm";
+            }
             return;
         }
 
-        container.innerHTML = openTrades.map(t => `
-            <tr class="border-b border-white/5 hover:bg-white/[0.02] transition font-mono text-xs">
-                <td class="py-3 px-3">
-                    <div class="flex items-center space-x-2">
-                        <span class="font-bold text-white">${t.symbol}</span>
-                        <span class="text-[10px] px-1.5 py-0.5 rounded ${t.mode === 'REAL' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'}">${t.mode}</span>
-                    </div>
-                </td>
-                <td class="py-3 px-3">
-                    <span class="px-2 py-0.5 rounded text-[11px] font-bold ${t.side === 'BUY' ? 'badge-buy' : 'badge-sell'}">${t.side}</span>
-                </td>
-                <td class="py-3 px-3 text-gray-300">$${t.entry_price.toFixed(4)}</td>
-                <td class="py-3 px-3 text-gray-300">$${t.amount_usdt.toFixed(2)}</td>
-                <td class="py-3 px-3 text-red-400">$${t.stop_loss ? t.stop_loss.toFixed(4) : '-'}</td>
-                <td class="py-3 px-3 text-emerald-400">$${t.take_profit ? t.take_profit.toFixed(4) : '-'}</td>
-                <td class="py-3 px-3 text-right">
-                    <button onclick="window.dashboardApp.closePosition(${t.id})" class="px-2.5 py-1 rounded bg-red-600/80 hover:bg-red-500 text-white font-sans text-[11px] transition">
-                        Close
-                    </button>
-                </td>
-            </tr>
-        `).join("");
+        let totalLivePnl = 0;
+        let totalEntryAmount = 0;
+
+        container.innerHTML = openTrades.map(t => {
+            const currentPrice = t.current_price || t.entry_price;
+            let livePnl = t.live_pnl;
+            let livePnlPct = t.live_pnl_pct;
+
+            if (livePnl === undefined || livePnl === null) {
+                if (t.side === "BUY") {
+                    livePnl = (currentPrice - t.entry_price) * t.quantity - (t.fees || 0);
+                    livePnlPct = ((currentPrice - t.entry_price) / t.entry_price) * 100.0;
+                } else {
+                    livePnl = (t.entry_price - currentPrice) * t.quantity - (t.fees || 0);
+                    livePnlPct = ((t.entry_price - currentPrice) / t.entry_price) * 100.0;
+                }
+            }
+
+            totalLivePnl += livePnl;
+            totalEntryAmount += t.amount_usdt;
+
+            const isPositive = livePnl >= 0;
+            const pnlColor = isPositive ? "text-emerald-400" : "text-red-400";
+            const pnlBg = isPositive ? "bg-emerald-500/10 border-emerald-500/20" : "bg-red-500/10 border-red-500/20";
+
+            return `
+                <tr class="border-b border-white/5 hover:bg-white/[0.02] transition font-mono text-xs">
+                    <td class="py-3 px-3">
+                        <div class="flex items-center space-x-2">
+                            <span class="font-bold text-white">${t.symbol}</span>
+                            <span class="text-[10px] px-1.5 py-0.5 rounded ${t.mode === 'REAL' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'}">${t.mode}</span>
+                        </div>
+                    </td>
+                    <td class="py-3 px-3">
+                        <span class="px-2 py-0.5 rounded text-[11px] font-bold ${t.side === 'BUY' ? 'badge-buy' : 'badge-sell'}">${t.side}</span>
+                    </td>
+                    <td class="py-3 px-3 text-gray-300">$${t.entry_price.toFixed(4)}</td>
+                    <td class="py-3 px-3 text-indigo-300 font-bold">$${currentPrice.toFixed(4)}</td>
+                    <td class="py-3 px-3 text-gray-300">$${t.amount_usdt.toFixed(2)}</td>
+                    <td class="py-3 px-3 text-red-400">$${t.stop_loss ? t.stop_loss.toFixed(4) : '-'}</td>
+                    <td class="py-3 px-3 text-emerald-400">$${t.take_profit ? t.take_profit.toFixed(4) : '-'}</td>
+                    <td class="py-3 px-3">
+                        <span class="px-2 py-1 rounded-md border font-bold ${pnlBg} ${pnlColor} inline-flex items-center space-x-1">
+                            <span>${isPositive ? '+' : ''}$${livePnl.toFixed(2)}</span>
+                            <span class="text-[10px] opacity-80">(${isPositive ? '+' : ''}${livePnlPct.toFixed(2)}%)</span>
+                        </span>
+                    </td>
+                    <td class="py-3 px-3 text-right">
+                        <button onclick="window.dashboardApp.closePosition(${t.id})" class="px-2.5 py-1 rounded bg-red-600/80 hover:bg-red-500 text-white font-sans text-[11px] transition cursor-pointer">
+                            Close
+                        </button>
+                    </td>
+                </tr>
+            `;
+        }).join("");
+
+        // Update live PnL badges
+        const isTotalPos = totalLivePnl >= 0;
+        const totalPct = totalEntryAmount > 0 ? (totalLivePnl / totalEntryAmount) * 100.0 : 0.0;
+        const totalPnlStr = `${isTotalPos ? '+' : ''}$${totalLivePnl.toFixed(2)} (${isTotalPos ? '+' : ''}${totalPct.toFixed(2)}%)`;
+
+        if (livePnlBadge) {
+            livePnlBadge.innerText = `Live PnL: ${totalPnlStr}`;
+            livePnlBadge.className = `text-xs px-2.5 py-0.5 rounded-full font-mono font-bold border ml-2 ${isTotalPos ? 'bg-emerald-950/60 border-emerald-500/30 text-emerald-400' : 'bg-red-950/60 border-red-500/30 text-red-400'}`;
+        }
+
+        if (headerLivePnl) {
+            headerLivePnl.innerText = totalPnlStr;
+            headerLivePnl.className = `font-mono font-bold text-sm ${isTotalPos ? 'text-emerald-400' : 'text-red-400'}`;
+        }
     }
 
     renderTradeHistory(closedTrades) {
@@ -778,11 +834,11 @@ class DashboardApp {
             if (this.currentSymbol) {
                 this.fetchSymbolTicker(this.currentSymbol);
             }
-        }, 5000);
+        }, 3000);
 
         setInterval(() => {
             this.fetchBalances();
             this.fetchTrades();
-        }, 15000);
+        }, 5000);
     }
 }

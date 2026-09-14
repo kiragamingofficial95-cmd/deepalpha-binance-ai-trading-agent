@@ -84,6 +84,14 @@
                     </div>
                 </div>
 
+                <div class="glass-card px-4 py-2 flex items-center space-x-3 text-xs">
+                    <div class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></div>
+                    <div>
+                        <span class="text-gray-400 block text-[10px] uppercase font-semibold tracking-wider">Open Positions Live PnL</span>
+                        <span id="statLiveUnrealizedPnl" class="font-mono font-bold text-gray-300 text-sm">$0.00</span>
+                    </div>
+                </div>
+
                 <!-- Mode Selector -->
                 <div class="glass-card px-3 py-1.5 flex items-center space-x-2 text-xs">
                     <span class="text-gray-400 font-medium">Mode:</span>
@@ -265,6 +273,7 @@
                         <div class="flex items-center space-x-2">
                             <h2 class="font-bold text-sm text-white">Active Open Positions</h2>
                             <span id="openPositionsCount" class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 font-mono font-bold">0</span>
+                            <span id="openPositionsLivePnlBadge" class="text-xs px-2.5 py-0.5 rounded-full font-mono font-bold bg-black/40 border border-white/10 text-gray-300 ml-2">Live PnL: $0.00</span>
                         </div>
                         <button onclick="window.dashboardApp.fetchTrades()" class="text-xs text-gray-400 hover:text-white flex items-center space-x-1">
                             <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
@@ -275,19 +284,21 @@
                     <div class="overflow-x-auto flex-1">
                         <table class="w-full text-left">
                             <thead>
-                                <tr class="text-[11px] text-gray-400 uppercase tracking-wider border-b border-white/5 pb-2">
+                                <tr class="text-[11px] text-gray-400 uppercase tracking-wider border-b border-white/5 pb-2 font-mono">
                                     <th class="py-2 px-3">Symbol</th>
                                     <th class="py-2 px-3">Side</th>
-                                    <th class="py-2 px-3">Entry Price</th>
+                                    <th class="py-2 px-3">Entry</th>
+                                    <th class="py-2 px-3">Current</th>
                                     <th class="py-2 px-3">Position ($)</th>
                                     <th class="py-2 px-3">Stop Loss</th>
                                     <th class="py-2 px-3">Take Profit</th>
+                                    <th class="py-2 px-3">Live PnL</th>
                                     <th class="py-2 px-3 text-right">Action</th>
                                 </tr>
                             </thead>
                             <tbody id="openPositionsTable">
                                 <tr>
-                                    <td colspan="7" class="text-center py-6 text-gray-500 text-xs">
+                                    <td colspan="9" class="text-center py-6 text-gray-500 text-xs">
                                         No active positions open right now. Engine is scanning.
                                     </td>
                                 </tr>

@@ -5,11 +5,12 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import select, desc
 from app.database import AsyncSessionLocal, Trade, PaperBalance
+from app.binance_client import binance_client
 
 class AnalyticsEngine:
     async def get_performance_summary(self, mode: Optional[str] = None) -> dict[str, Any]:
         """
-        Calculates full quantitative performance metrics.
+        Calculates full quantitative performance metrics including realized and live unrealized PnL.
         """
         async with AsyncSessionLocal() as session:
             query = select(Trade).order_by(Trade.entry_time.asc())
@@ -31,6 +32,27 @@ class AnalyticsEngine:
         closed_count = len(closed_trades)
         open_count = len(open_trades)
 
+        # Compute live unrealized PnL across open positions
+        total_unrealized_pnl = 0.0
+        open_positions_with_live = []
+
+        for ot in open_trades:
+            ticker = await binance_client.fetch_ticker(ot.symbol)
+            curr_p = ticker.get("price", ot.entry_price)
+            if ot.side == "BUY":
+                u_pnl = (curr_p - ot.entry_price) * ot.quantity - ot.fees
+                u_pct = ((curr_p - ot.entry_price) / ot.entry_price) * 100.0
+            else:
+                u_pnl = (ot.entry_price - curr_p) * ot.quantity - ot.fees
+                u_pct = ((ot.entry_price - curr_p) / ot.entry_price) * 100.0
+            
+            total_unrealized_pnl += u_pnl
+            ot_dict = ot.to_dict()
+            ot_dict["current_price"] = round(curr_p, 4)
+            ot_dict["live_pnl"] = round(u_pnl, 2)
+            ot_dict["live_pnl_pct"] = round(u_pct, 2)
+            open_positions_with_live.append(ot_dict)
+
         if not closed_trades:
             return {
                 "mode": mode or "ALL",
@@ -42,6 +64,7 @@ class AnalyticsEngine:
                 "loss_count": 0,
                 "win_rate_pct": 0.0,
                 "total_realized_pnl": 0.0,
+                "total_unrealized_pnl": round(total_unrealized_pnl, 2),
                 "total_fees": 0.0,
                 "profit_factor": 0.0,
                 "sharpe_ratio": 0.0,
@@ -53,6 +76,7 @@ class AnalyticsEngine:
                 "largest_loss": 0.0,
                 "avg_duration_minutes": 0.0,
                 "equity_curve": [{"time": datetime.datetime.utcnow().isoformat(), "equity": paper_usdt, "pnl": 0.0}],
+                "open_positions": open_positions_with_live,
                 "symbol_breakdown": {}
             }
 
@@ -142,6 +166,7 @@ class AnalyticsEngine:
             "loss_count": loss_count,
             "win_rate_pct": round(win_rate, 2),
             "total_realized_pnl": round(total_pnl, 2),
+            "total_unrealized_pnl": round(total_unrealized_pnl, 2),
             "total_fees": round(total_fees, 2),
             "profit_factor": profit_factor,
             "sharpe_ratio": sharpe,
@@ -153,6 +178,7 @@ class AnalyticsEngine:
             "largest_loss": largest_loss,
             "avg_duration_minutes": avg_duration,
             "equity_curve": equity_curve,
+            "open_positions": open_positions_with_live,
             "symbol_breakdown": symbol_breakdown
         }
 
@@ -175,6 +201,22 @@ class AnalyticsEngine:
 
             res = await session.execute(query.limit(limit).offset(offset))
             trades = [t.to_dict() for t in res.scalars().all()]
+
+            # Dynamically compute live PnL for open positions
+            for t in trades:
+                if t["status"] == "OPEN":
+                    ticker = await binance_client.fetch_ticker(t["symbol"])
+                    curr_p = ticker.get("price", t["entry_price"])
+                    t["current_price"] = round(curr_p, 4)
+                    if t["side"] == "BUY":
+                        u_pnl = (curr_p - t["entry_price"]) * t["quantity"] - t["fees"]
+                        u_pct = ((curr_p - t["entry_price"]) / t["entry_price"]) * 100.0
+                    else:
+                        u_pnl = (t["entry_price"] - curr_p) * t["quantity"] - t["fees"]
+                        u_pct = ((t["entry_price"] - curr_p) / t["entry_price"]) * 100.0
+                    t["live_pnl"] = round(u_pnl, 2)
+                    t["live_pnl_pct"] = round(u_pct, 2)
+
             return {"trades": trades, "count": len(trades)}
 
 
