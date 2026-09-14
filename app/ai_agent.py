@@ -203,9 +203,50 @@ class AIAgent:
             self._groq_client = AsyncGroq(api_key=self.api_key)
         return self._groq_client
 
+    async def get_available_models(self, key: Optional[str] = None) -> list[str]:
+        """Fetch active models supported by the provided or current Groq key."""
+        api_key = (key or self.api_key or "").strip()
+        fallback_models = [
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "llama-3.1-70b-versatile",
+            "deepseek-r1-distill-llama-70b",
+            "gemma2-9b-it",
+            "mixtral-8x7b-32768",
+            "qwen-2.5-32b"
+        ]
+        if not api_key:
+            return fallback_models
+
+        try:
+            client = AsyncGroq(api_key=api_key)
+            models_page = await client.models.list()
+            raw_ids = [m.id for m in models_page.data if not m.id.startswith("whisper")]
+            if raw_ids:
+                priority = [
+                    "llama-3.3-70b-versatile",
+                    "llama-3.1-8b-instant",
+                    "llama3-70b-8192",
+                    "llama3-8b-8192",
+                    "llama-3.1-70b-versatile",
+                    "deepseek-r1-distill-llama-70b"
+                ]
+                sorted_models = sorted(
+                    raw_ids,
+                    key=lambda x: (0 if x in priority else 1, priority.index(x) if x in priority else x)
+                )
+                return sorted_models
+        except Exception as e:
+            logger.warning(f"Could not list models from Groq: {e}")
+
+        return fallback_models
+
     async def test_connection(self, key: str, model: str) -> dict[str, Any]:
         """
-        Lightweight connection test that validates the Groq API key and model without heavy payload.
+        Validates Groq API key, dynamically detects active models on user's tier,
+        and auto-recovers if a model ID is unavailable or deprecated.
         """
         if not key or not key.strip():
             return {"success": False, "error": "API Key is empty"}
@@ -213,10 +254,17 @@ class AIAgent:
         cleaned_key = key.strip()
         client = AsyncGroq(api_key=cleaned_key)
         
-        # Test model list or simple completion
+        # 1. Fetch available models on user's Groq key
+        available_models = await self.get_available_models(cleaned_key)
+        
+        target_model = model.strip() if model else "llama-3.3-70b-versatile"
+        if available_models and target_model not in available_models:
+            target_model = available_models[0]
+
+        # 2. Test completion with target model
         try:
             resp = await client.chat.completions.create(
-                model=model,
+                model=target_model,
                 messages=[{"role": "user", "content": "Respond with 'CONNECTED'"}],
                 max_tokens=10,
                 temperature=0.1
@@ -224,34 +272,37 @@ class AIAgent:
             content = resp.choices[0].message.content if resp.choices else "OK"
             return {
                 "success": True,
-                "model": model,
-                "message": f"Groq AI authenticated successfully using {model}",
+                "model": target_model,
+                "available_models": available_models,
+                "message": f"Groq AI authenticated successfully using {target_model}",
                 "reply": content
             }
         except Exception as e:
             err_msg = str(e)
-            logger.warning(f"Groq test failed for model {model}: {err_msg}")
+            logger.warning(f"Groq test failed for model {target_model}: {err_msg}")
             
-            # If the specific model failed, attempt fallback to llama-3.1-8b-instant or llama-3.3-70b-versatile
-            if "model" in err_msg.lower() or "not found" in err_msg.lower():
+            # Try other models from available list
+            for fallback_m in available_models:
+                if fallback_m == target_model:
+                    continue
                 try:
-                    fallback_model = "llama-3.1-8b-instant" if model != "llama-3.1-8b-instant" else "llama-3.3-70b-versatile"
                     resp = await client.chat.completions.create(
-                        model=fallback_model,
+                        model=fallback_m,
                         messages=[{"role": "user", "content": "Respond with 'CONNECTED'"}],
                         max_tokens=10,
                         temperature=0.1
                     )
                     return {
                         "success": True,
-                        "model": fallback_model,
-                        "message": f"Connected successfully using fallback model {fallback_model} (Selected model '{model}' unavailable)",
+                        "model": fallback_m,
+                        "available_models": available_models,
+                        "message": f"Connected using active model {fallback_m} (Model '{target_model}' was unavailable)",
                         "reply": resp.choices[0].message.content
                     }
-                except Exception as e2:
-                    return {"success": False, "error": f"Groq Error: {str(e2)}"}
+                except Exception:
+                    continue
 
-            return {"success": False, "error": f"Groq Error: {err_msg}"}
+            return {"success": False, "error": f"Groq Error: {err_msg}", "available_models": available_models}
 
     async def set_api_key(self, key: str, model: str = "llama-3.3-70b-versatile"):
         self.api_key = key.strip()
@@ -278,6 +329,7 @@ class AIAgent:
         """
         Processes a multi-turn chat message with Groq LLM, executes tool calls,
         updates memory and returns the AI assistant response.
+        Includes automatic model recovery if a model is deprecated or not found.
         """
         client = await self.get_client()
         if not client:
@@ -341,31 +393,50 @@ class AIAgent:
 
         tools_executed = []
         try:
-            # 1st Groq API Call with tool calling
+            # 1st Groq API Call with model recovery fallback
+            response = None
+            current_model = self.model
+
             try:
                 response = await client.chat.completions.create(
-                    model=self.model,
+                    model=current_model,
                     messages=messages,
                     tools=AVAILABLE_TOOLS,
                     tool_choice="auto",
                     temperature=0.3,
                     max_tokens=2048
                 )
-            except Exception as tool_err:
-                # If model doesn't support tools, fallback to plain completion
-                logger.warning(f"Tools completion failed, retrying without tools: {tool_err}")
-                response = await client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=0.3,
-                    max_tokens=2048
-                )
+            except Exception as initial_err:
+                err_str = str(initial_err).lower()
+                logger.warning(f"Groq completion error with model {current_model}: {initial_err}")
+                
+                # If model not found or tool error, fetch active models and retry
+                available_models = await self.get_available_models()
+                for alt_model in available_models:
+                    if alt_model == current_model:
+                        continue
+                    try:
+                        logger.info(f"Attempting Groq chat with alternate model: {alt_model}")
+                        response = await client.chat.completions.create(
+                            model=alt_model,
+                            messages=messages,
+                            temperature=0.3,
+                            max_tokens=2048
+                        )
+                        # Save recovered model
+                        self.model = alt_model
+                        current_model = alt_model
+                        break
+                    except Exception as alt_err:
+                        continue
+
+                if response is None:
+                    raise initial_err
 
             assistant_msg = response.choices[0].message
 
             # Check if tools are called
             if hasattr(assistant_msg, "tool_calls") and assistant_msg.tool_calls:
-                # Add assistant message with tool calls to conversation
                 tool_calls_data = [
                     {
                         "id": tc.id,
@@ -405,9 +476,9 @@ class AIAgent:
                         "content": json.dumps(tool_result)
                     })
 
-                # 2nd Groq call to generate final human response with tool results
+                # 2nd Groq call to generate final response with tool results
                 second_response = await client.chat.completions.create(
-                    model=self.model,
+                    model=current_model,
                     messages=messages,
                     temperature=0.3,
                     max_tokens=2048

@@ -21,6 +21,7 @@ class DashboardApp {
         this.fetchTrades();
         this.fetchStrategies();
         this.fetchAnalytics();
+        this.fetchGroqModels();
         this.startPeriodicUpdates();
     }
 
@@ -664,10 +665,39 @@ class DashboardApp {
         const data = await res.json();
         if (data.success) {
             this.showToast("Groq AI Active", data.message || `Connected with model: ${data.model || model}`);
+            if (data.available_models && data.available_models.length > 0) {
+                this.updateGroqModelDropdown(data.available_models, data.model);
+            }
             if (window.aiChat) window.aiChat.loadHistory();
         } else {
+            if (data.available_models && data.available_models.length > 0) {
+                this.updateGroqModelDropdown(data.available_models);
+            }
             alert(`Groq Connection Failed:\n\n${data.error || "Please check that your Groq API key (starts with 'gsk_...') is valid and has active quota."}`);
         }
+    }
+
+    async fetchGroqModels(key = "") {
+        try {
+            const url = key ? `/api/groq/models?api_key=${encodeURIComponent(key)}` : `/api/groq/models`;
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.models && data.models.length > 0) {
+                this.updateGroqModelDropdown(data.models, data.active_model);
+            }
+        } catch (e) {
+            console.error("Failed to fetch Groq models:", e);
+        }
+    }
+
+    updateGroqModelDropdown(models, activeModel = null) {
+        const select = document.getElementById("groqModelSelect");
+        if (!select) return;
+
+        const currentVal = activeModel || select.value;
+        select.innerHTML = models.map(m => `
+            <option value="${m}" ${m === currentVal ? 'selected' : ''}>${m}</option>
+        `).join("");
     }
 
     async fetchStrategies() {

@@ -263,13 +263,20 @@ async def setup_groq(payload: GroqConfigRequest):
             "success": True,
             "message": test_result.get("message", "Connected successfully"),
             "model": actual_model,
+            "available_models": test_result.get("available_models", []),
             "reply": test_result.get("reply")
         }
     return {
         "success": False,
         "error": test_result.get("error", "Connection failed"),
+        "available_models": test_result.get("available_models", []),
         "model": payload.model
     }
+
+@app.get("/api/groq/models")
+async def get_groq_models(api_key: Optional[str] = None):
+    models = await ai_agent.get_available_models(api_key)
+    return {"models": models, "active_model": ai_agent.model}
 
 
 # ==========================================
