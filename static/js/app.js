@@ -663,10 +663,10 @@ class DashboardApp {
         });
         const data = await res.json();
         if (data.success) {
-            this.showToast("Groq AI Active", `Connected with model: ${model}`);
+            this.showToast("Groq AI Active", data.message || `Connected with model: ${data.model || model}`);
             if (window.aiChat) window.aiChat.loadHistory();
         } else {
-            alert("Groq Key verification test failed. Please check the API key.");
+            alert(`Groq Connection Failed:\n\n${data.error || "Please check that your Groq API key (starts with 'gsk_...') is valid and has active quota."}`);
         }
     }
 

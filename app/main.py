@@ -254,13 +254,22 @@ async def test_binance_status():
 
 @app.post("/api/auth/groq")
 async def setup_groq(payload: GroqConfigRequest):
-    await ai_agent.set_api_key(key=payload.api_key, model=payload.model)
-    # Run a test prompt
-    test_chat = await ai_agent.chat("Say 'DEEPALPHA_READY' and nothing else.", session_id="test_probe")
-    success = test_chat.get("success", False)
-    if success:
-        bot_runner.log_event("INFO", f"Groq AI connected successfully with model {payload.model}")
-    return {"success": success, "response": test_chat.get("content"), "model": payload.model}
+    test_result = await ai_agent.test_connection(payload.api_key, payload.model)
+    if test_result.get("success"):
+        actual_model = test_result.get("model", payload.model)
+        await ai_agent.set_api_key(key=payload.api_key, model=actual_model)
+        bot_runner.log_event("INFO", f"Groq AI connected successfully with model {actual_model}")
+        return {
+            "success": True,
+            "message": test_result.get("message", "Connected successfully"),
+            "model": actual_model,
+            "reply": test_result.get("reply")
+        }
+    return {
+        "success": False,
+        "error": test_result.get("error", "Connection failed"),
+        "model": payload.model
+    }
 
 
 # ==========================================

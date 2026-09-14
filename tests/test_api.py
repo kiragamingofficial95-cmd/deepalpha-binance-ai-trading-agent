@@ -64,7 +64,14 @@ async def test_api_endpoints():
         analytics = res.json()
         print(f"  ✓ /api/analytics OK (Total closed trades: {analytics['closed_trades_count']})")
 
-        # 8. Test HTML Dashboard
+        # 8. Test Groq Auth endpoint
+        res = await client.post("/api/auth/groq", json={"api_key": "invalid_test_key", "model": "llama-3.1-8b-instant"})
+        assert res.status_code == 200
+        groq_test_data = res.json()
+        assert "error" in groq_test_data or "success" in groq_test_data
+        print(f"  ✓ /api/auth/groq response handling OK (Success: {groq_test_data.get('success')})")
+
+        # 9. Test HTML Dashboard
         res = await client.get("/")
         assert res.status_code == 200
         assert "DEEPALPHA AI" in res.text

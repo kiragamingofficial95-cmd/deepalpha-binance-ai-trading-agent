@@ -203,25 +203,75 @@ class AIAgent:
             self._groq_client = AsyncGroq(api_key=self.api_key)
         return self._groq_client
 
+    async def test_connection(self, key: str, model: str) -> dict[str, Any]:
+        """
+        Lightweight connection test that validates the Groq API key and model without heavy payload.
+        """
+        if not key or not key.strip():
+            return {"success": False, "error": "API Key is empty"}
+
+        cleaned_key = key.strip()
+        client = AsyncGroq(api_key=cleaned_key)
+        
+        # Test model list or simple completion
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Respond with 'CONNECTED'"}],
+                max_tokens=10,
+                temperature=0.1
+            )
+            content = resp.choices[0].message.content if resp.choices else "OK"
+            return {
+                "success": True,
+                "model": model,
+                "message": f"Groq AI authenticated successfully using {model}",
+                "reply": content
+            }
+        except Exception as e:
+            err_msg = str(e)
+            logger.warning(f"Groq test failed for model {model}: {err_msg}")
+            
+            # If the specific model failed, attempt fallback to llama-3.1-8b-instant or llama-3.3-70b-versatile
+            if "model" in err_msg.lower() or "not found" in err_msg.lower():
+                try:
+                    fallback_model = "llama-3.1-8b-instant" if model != "llama-3.1-8b-instant" else "llama-3.3-70b-versatile"
+                    resp = await client.chat.completions.create(
+                        model=fallback_model,
+                        messages=[{"role": "user", "content": "Respond with 'CONNECTED'"}],
+                        max_tokens=10,
+                        temperature=0.1
+                    )
+                    return {
+                        "success": True,
+                        "model": fallback_model,
+                        "message": f"Connected successfully using fallback model {fallback_model} (Selected model '{model}' unavailable)",
+                        "reply": resp.choices[0].message.content
+                    }
+                except Exception as e2:
+                    return {"success": False, "error": f"Groq Error: {str(e2)}"}
+
+            return {"success": False, "error": f"Groq Error: {err_msg}"}
+
     async def set_api_key(self, key: str, model: str = "llama-3.3-70b-versatile"):
-        self.api_key = key
-        self.model = model
-        self._groq_client = AsyncGroq(api_key=key)
+        self.api_key = key.strip()
+        self.model = model.strip()
+        self._groq_client = AsyncGroq(api_key=self.api_key)
         async with AsyncSessionLocal() as session:
             # Store in DB
             res = await session.execute(select(SettingKV).where(SettingKV.key == "GROQ_API_KEY"))
             kv = res.scalar_one_or_none()
             if kv:
-                kv.value = key
+                kv.value = self.api_key
             else:
-                session.add(SettingKV(key="GROQ_API_KEY", value=key))
+                session.add(SettingKV(key="GROQ_API_KEY", value=self.api_key))
 
             res_m = await session.execute(select(SettingKV).where(SettingKV.key == "GROQ_MODEL"))
             kv_m = res_m.scalar_one_or_none()
             if kv_m:
-                kv_m.value = model
+                kv_m.value = self.model
             else:
-                session.add(SettingKV(key="GROQ_MODEL", value=model))
+                session.add(SettingKV(key="GROQ_MODEL", value=self.model))
             await session.commit()
 
     async def chat(self, user_message: str, session_id: str = "default") -> dict[str, Any]:
@@ -291,20 +341,30 @@ class AIAgent:
 
         tools_executed = []
         try:
-            # 1st Groq API Call
-            response = await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=AVAILABLE_TOOLS,
-                tool_choice="auto",
-                temperature=0.3,
-                max_tokens=2048
-            )
+            # 1st Groq API Call with tool calling
+            try:
+                response = await client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=AVAILABLE_TOOLS,
+                    tool_choice="auto",
+                    temperature=0.3,
+                    max_tokens=2048
+                )
+            except Exception as tool_err:
+                # If model doesn't support tools, fallback to plain completion
+                logger.warning(f"Tools completion failed, retrying without tools: {tool_err}")
+                response = await client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.3,
+                    max_tokens=2048
+                )
 
             assistant_msg = response.choices[0].message
 
             # Check if tools are called
-            if assistant_msg.tool_calls:
+            if hasattr(assistant_msg, "tool_calls") and assistant_msg.tool_calls:
                 # Add assistant message with tool calls to conversation
                 tool_calls_data = [
                     {
