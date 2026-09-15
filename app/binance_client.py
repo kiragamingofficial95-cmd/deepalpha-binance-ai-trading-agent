@@ -185,7 +185,12 @@ class BinanceClient:
         # Generate realistic historical candles for paper simulation if gateway is unreachable
         base_p = self._last_known_prices.get(formatted_symbol, 100.0)
         now = int(time.time() * 1000)
-        interval_ms = 15 * 60 * 1000 if timeframe == "15m" else 5 * 60 * 1000
+        tf_map = {
+            "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+            "30m": 1_800_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
+            "6h": 21_600_000, "8h": 28_800_000, "12h": 43_200_000, "1d": 86_400_000
+        }
+        interval_ms = tf_map.get(timeframe, 900_000)
         candles = []
         p = base_p * 0.96
         for i in range(limit):
