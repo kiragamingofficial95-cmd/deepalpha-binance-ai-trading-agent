@@ -172,6 +172,18 @@ class StrategyEngine:
             return symbol in watchlist
         return symbol.upper().replace("/", "") in syms
 
+    async def _fetch_multi_tf_data(self, symbol: str) -> dict[str, pd.DataFrame]:
+        """Fetch 4H, 1H, 15M, 5M data for full ICT analysis."""
+        data = {}
+        for tf in ["4h", "1h", "15m", "5m"]:
+            try:
+                df = await binance_client.fetch_klines(symbol, timeframe=tf, limit=100)
+                if not df.empty:
+                    data[tf] = df
+            except Exception as e:
+                logger.warning(f"Failed to fetch {tf} for {symbol}: {e}")
+        return data
+
     async def evaluate_symbol(
         self,
         symbol: str,
