@@ -178,8 +178,14 @@ class BinanceClient:
                         for col in ['open', 'high', 'low', 'close', 'volume']:
                             df[col] = df[col].astype(float)
                         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                        logger.info(f"fetch_klines {symbol} {tf}: gateway={base_url} rows={len(df)}")
                         return df
-            except Exception:
+                    else:
+                        logger.warning(f"fetch_klines {symbol} {timeframe}: gateway={base_url} returned empty raw_data")
+                else:
+                    logger.warning(f"fetch_klines {symbol} {timeframe}: gateway={base_url} status={resp.status_code}")
+            except Exception as e:
+                logger.error(f"fetch_klines {symbol} {timeframe}: gateway={base_url} error={e}")
                 continue
 
         # Generate realistic historical candles for paper simulation if gateway is unreachable

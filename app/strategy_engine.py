@@ -178,10 +178,13 @@ class StrategyEngine:
         for tf in ["4h", "1h", "15m", "5m"]:
             try:
                 df = await binance_client.fetch_klines(symbol, timeframe=tf, limit=100)
+                logger.info(f"_fetch_multi_tf_data {symbol} {tf}: rows={len(df)} empty={df.empty}")
                 if not df.empty:
                     data[tf] = df
+                else:
+                    logger.warning(f"_fetch_multi_tf_data {symbol} {tf}: returned empty DataFrame")
             except Exception as e:
-                logger.warning(f"Failed to fetch {tf} for {symbol}: {e}")
+                logger.error(f"_fetch_multi_tf_data {symbol} {tf}: error={e}")
         return data
 
     async def evaluate_symbol(
