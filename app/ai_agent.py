@@ -14,18 +14,15 @@ from app.indicators import analyze_all_indicators
 
 logger = logging.getLogger("ai_agent")
 
-SYSTEM_PROMPT = """You are DEEPALPHA AI, an elite institutional crypto quantitative trading and strategy optimization AI agent for Binance.
-You have direct control over a 24/7 trading engine capable of Paper Trading and Real Binance Trading.
+SYSTEM_PROMPT = """You are DEEPALPHA AI, an elite institutional crypto quantitative trading and strategy optimization agent for Binance, controlling a 24/7 engine that can Paper Trade or Trade Real Binance funds.
 
-Your primary missions:
-1. Strategy Optimization & Continuous Learning: Analyze trade performance (win rates, profit factor, losing patterns, risk-to-reward) from paper/real trade logs, identify what works in current market regimes (bullish, bearish, chop), and proactively tune active strategy parameters (RSI thresholds, EMA spans, Stop-Loss, Take-Profit, Trailing Stops).
-2. Memory & Playbook Evolution: Synthesize trading insights into persistent long-term memory records (`save_learned_memory`) so the autonomous engine adapts over time.
-3. Live Market Intelligence: Deeply evaluate Binance pairs with technical indicators (RSI, MACD, Bollinger Bands, EMA 20/50/200, Volume, ATR) and formulate high-probability trade setups.
-4. Execution & Supervision: Execute trades, adjust risk rules, start/stop the 24/7 autonomous runner when instructed.
+Missions:
+1. Strategy Optimization: analyze trade performance (win rate, profit factor, losing patterns, risk-reward) from paper/real trade logs, identify what works in the current regime (bullish/bearish/chop), and tune active strategy parameters (RSI thresholds, EMA spans, SL/TP, trailing stops).
+2. Memory & Playbook: synthesize insights into persistent long-term memory via `save_learned_memory` so the engine adapts over time.
+3. Market Intelligence: evaluate Binance pairs with technical indicators (RSI, MACD, Bollinger, EMA 20/50/200, Volume, ATR) and propose high-probability setups.
+4. Execution & Supervision: execute trades, adjust risk rules, start/stop the autonomous runner when asked.
 
-When answering, be decisive, analytical, precise, and quantify your reasoning.
-You have access to tools for querying trade performance, tuning parameters, saving lessons, querying live market metrics, and managing bot operations. Always use the appropriate tool when user asks to inspect trades, change strategy, adjust parameters, or check market conditions.
-"""
+Be decisive, analytical, precise, and quantify your reasoning. Use the provided tools when asked to inspect trades, change strategy, tune parameters, or check the market."""
 
 AVAILABLE_TOOLS = [
     {
@@ -177,11 +174,79 @@ AVAILABLE_TOOLS = [
 ]
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars per token) so the payload stays under model limits."""
+    if not text:
+        return 0
+    return max(1, int(len(text) / 4))
+
+
+def _bounded_chars(text: str | None, max_chars: int) -> str | None:
+    """Truncate a string while keeping the end marker so the model knows it was cut."""
+    if text is None:
+        return None
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 24)].rstrip() + "\n...[truncated]"
+
+
 class AIAgent:
     def __init__(self):
         self._groq_client: Optional[AsyncGroq] = None
         self.api_key = settings.GROQ_API_KEY
         self.model = settings.GROQ_MODEL
+
+    def _compact_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Enforce a hard input-token budget so requests never exceed model limits (avoids 413)."""
+        max_tokens = settings.GROQ_MAX_INPUT_TOKENS
+        # Very conservative budgets (4 chars/token)
+        system_budget = int(max_tokens * 0.12)
+        content_budget = int(max_tokens * 0.75)
+
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            if role == "system" and "content" in msg:
+                msg["content"] = _bounded_chars(msg["content"], system_budget * 4)
+
+        # Per-message content cap so no single message can blow the whole window
+        per_msg_chars = int(max_tokens * 0.35) * 4
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if "content" in msg and isinstance(msg["content"], str):
+                msg["content"] = _bounded_chars(msg["content"], min(content_budget * 4, per_msg_chars))
+            elif "tool_calls" in msg:
+                # Shrink tool call arguments (which embed prior tool results)
+                try:
+                    calls = json.loads(json.dumps(msg["tool_calls"]))
+                    for call in calls if isinstance(calls, list) else []:
+                        fn = call.get("function") if isinstance(call, dict) else None
+                        if fn and isinstance(fn.get("arguments"), str):
+                            fn["arguments"] = _bounded_chars(fn["arguments"], 1500)
+                    msg["tool_calls"] = calls
+                except Exception:
+                    pass
+            elif "content" in msg and not isinstance(msg["content"], str):
+                msg["content"] = _bounded_chars(
+                    json.dumps(msg["content"], ensure_ascii=False, default=str), content_budget * 4
+                )
+
+        # Hard cap for dict content (normalized already above)
+        total_est = sum(_estimate_tokens(str(m.get("content", ""))) for m in messages if isinstance(m, dict))
+        if total_est > max_tokens:
+            # Drop oldest non-system messages until under budget
+            pruned = [m for m in messages if isinstance(m, dict) and m.get("role") == "system"]
+            for m in messages:
+                if not isinstance(m, dict) or m.get("role") == "system":
+                    continue
+                pruned.append(m)
+                if sum(_estimate_tokens(str(x.get("content", ""))) for x in pruned) > max_tokens:
+                    pruned.pop()
+                    break
+            messages = pruned
+        return messages
 
     async def get_client(self) -> Optional[AsyncGroq]:
         # Check DB for stored runtime API key
@@ -350,29 +415,32 @@ class AIAgent:
             ))
             await session.commit()
 
-            # Load recent conversation history (last 15 messages)
+            # Load recent conversation history (configurable count)
             history_res = await session.execute(
                 select(ChatMessage)
                 .where(ChatMessage.session_id == session_id)
                 .order_by(ChatMessage.timestamp.desc())
-                .limit(15)
+                .limit(settings.GROQ_HISTORY_MESSAGES)
             )
             history_messages = list(reversed(history_res.scalars().all()))
 
-            # Load active AI learned memories to inject into system prompt
+            # Load active AI learned memories (bounded) to inject into system prompt
             mem_res = await session.execute(
-                select(StrategyMemory).order_by(StrategyMemory.confidence_score.desc()).limit(8)
+                select(StrategyMemory).order_by(StrategyMemory.confidence_score.desc()).limit(settings.GROQ_MEMORY_BANK_LIMIT)
             )
             memories = mem_res.scalars().all()
             memory_context = "\n".join([
-                f"- [{m.category.upper()}] ({m.market_condition}) {m.title}: {m.content} (Confidence: {m.confidence_score*100:.0f}%, Success: {m.success_rate:.1f}%)"
+                f"- [{m.category.upper()}] ({m.market_condition}) {m.title}: {_bounded_chars(m.content, 300)} (Confidence: {m.confidence_score*100:.0f}%)"
                 for m in memories
             ])
 
             # Get active strategy
             strat_res = await session.execute(select(StrategyConfig).where(StrategyConfig.is_active == True))
             active_strat = strat_res.scalars().first()
-            strat_info = f"Active Strategy: {active_strat.display_name} (Params: {active_strat.parameters})" if active_strat else "No active strategy selected"
+            strat_info = _bounded_chars(
+                f"Active Strategy: {active_strat.display_name} (Params: {active_strat.parameters})",
+                600
+            ) if active_strat else "No active strategy selected"
 
         # Build messages payload for Groq
         messages = [
@@ -391,6 +459,9 @@ class AIAgent:
                     pass
             messages.append(msg_obj)
 
+        # Enforce a hard token budget before hitting Groq (prevents 413 rate-limit errors)
+        messages = self._compact_messages(messages)
+
         tools_executed = []
         try:
             # 1st Groq API Call with model recovery fallback
@@ -404,14 +475,25 @@ class AIAgent:
                     tools=AVAILABLE_TOOLS,
                     tool_choice="auto",
                     temperature=0.3,
-                    max_tokens=2048
+                    max_tokens=settings.GROQ_MAX_TOKENS
                 )
             except Exception as initial_err:
                 err_str = str(initial_err).lower()
                 logger.warning(f"Groq completion error with model {current_model}: {initial_err}")
-                
-                # If model not found or tool error, fetch active models and retry
+
+                # If we hit a token/rate-limit ceiling, drop the tool schema too
+                # (AVAILABLE_TOOLS costs ~1.5k input tokens by itself) and shrink payload.
+                rate_limited = ("rate_limit" in err_str or "request too large" in err_str or "tokens" in err_str)
+                if rate_limited:
+                    settings.GROQ_MAX_INPUT_TOKENS = 2500
+                    settings.GROQ_HISTORY_MESSAGES = 3
+                    settings.GROQ_MEMORY_BANK_LIMIT = 2
+                    messages = self._compact_messages(messages)
+
+                # If model not found or token-limited, fetch active models and retry.
+                # Drop tools when token-limited since the tool schema consumes input tokens.
                 available_models = await self.get_available_models()
+                tools_arg = None if rate_limited else AVAILABLE_TOOLS
                 for alt_model in available_models:
                     if alt_model == current_model:
                         continue
@@ -420,8 +502,9 @@ class AIAgent:
                         response = await client.chat.completions.create(
                             model=alt_model,
                             messages=messages,
+                            tools=tools_arg,
                             temperature=0.3,
-                            max_tokens=2048
+                            max_tokens=settings.GROQ_MAX_TOKENS
                         )
                         # Save recovered model
                         self.model = alt_model
@@ -469,19 +552,25 @@ class AIAgent:
                         "result": tool_result
                     })
 
+                    # Truncate huge tool results so they never blow the token budget
+                    result_str = _bounded_chars(
+                        json.dumps(tool_result, ensure_ascii=False, default=str),
+                        settings.GROQ_TOOL_RESULT_CHARS
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "name": fn_name,
-                        "content": json.dumps(tool_result)
+                        "content": result_str
                     })
 
                 # 2nd Groq call to generate final response with tool results
+                messages = self._compact_messages(messages)
                 second_response = await client.chat.completions.create(
                     model=current_model,
                     messages=messages,
                     temperature=0.3,
-                    max_tokens=2048
+                    max_tokens=settings.GROQ_MAX_TOKENS
                 )
                 final_content = second_response.choices[0].message.content or "Task completed."
             else:
@@ -517,7 +606,7 @@ class AIAgent:
     async def _execute_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Tool dispatcher for AI agent."""
         if name == "analyze_trade_history":
-            limit = args.get("limit", 15)
+            limit = min(int(args.get("limit", 8)), 15)
             mode = args.get("mode", "ALL")
             async with AsyncSessionLocal() as session:
                 query = select(Trade).order_by(desc(Trade.entry_time)).limit(limit)
@@ -525,12 +614,33 @@ class AIAgent:
                     query = query.where(Trade.mode == mode)
                 res = await session.execute(query)
                 trades = [t.to_dict() for t in res.scalars().all()]
-                
+
                 closed = [t for t in trades if t["status"] == "CLOSED"]
                 win_count = sum(1 for t in closed if t["pnl"] > 0)
                 loss_count = sum(1 for t in closed if t["pnl"] <= 0)
                 total_pnl = sum(t["pnl"] for t in closed)
                 win_rate = (win_count / len(closed) * 100) if closed else 0.0
+
+                # Compact per-trade summaries to keep the payload small for small-context models
+                trade_summaries = [
+                    {
+                        "id": t["id"],
+                        "symbol": t["symbol"],
+                        "side": t["side"],
+                        "mode": t["mode"],
+                        "amount_usdt": t["amount_usdt"],
+                        "entry_price": t["entry_price"],
+                        "exit_price": t["exit_price"],
+                        "pnl": t["pnl"],
+                        "pnl_pct": t["pnl_pct"],
+                        "status": t["status"],
+                        "strategy": t["strategy_name"],
+                        "entry_time": t["entry_time"],
+                        "exit_time": t["exit_time"],
+                        "entry_reason": t["entry_reason"]
+                    }
+                    for t in trades
+                ]
 
                 return {
                     "total_trades_analyzed": len(trades),
@@ -539,7 +649,7 @@ class AIAgent:
                     "loss_count": loss_count,
                     "win_rate_pct": round(win_rate, 2),
                     "total_realized_pnl": round(total_pnl, 2),
-                    "trades": trades
+                    "trades": trade_summaries
                 }
 
         elif name == "update_strategy_parameters":

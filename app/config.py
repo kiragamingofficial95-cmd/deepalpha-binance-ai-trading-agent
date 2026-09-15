@@ -40,6 +40,13 @@ class Settings(BaseSettings):
     MAX_DAILY_LOSS_PERCENT: float = float(os.getenv("MAX_DAILY_LOSS_PERCENT", "5.0")) # 5% daily circuit breaker
     DEFAULT_STOP_LOSS_PCT: float = float(os.getenv("DEFAULT_STOP_LOSS_PCT", "1.5")) # 1.5% SL
     DEFAULT_TAKE_PROFIT_PCT: float = float(os.getenv("DEFAULT_TAKE_PROFIT_PCT", "3.0")) # 3.0% TP (2:1 R:R)
+
+    # Groq AI token budget controls (prevents HTTP 413 rate-limit errors on small-context tiers)
+    GROQ_MAX_INPUT_TOKENS: int = int(os.getenv("GROQ_MAX_INPUT_TOKENS", "4500"))
+    GROQ_HISTORY_MESSAGES: int = int(os.getenv("GROQ_HISTORY_MESSAGES", "6"))
+    GROQ_MAX_TOKENS: int = int(os.getenv("GROQ_MAX_TOKENS", "1024"))
+    GROQ_MEMORY_BANK_LIMIT: int = int(os.getenv("GROQ_MEMORY_BANK_LIMIT", "4"))
+    GROQ_TOOL_RESULT_CHARS: int = int(os.getenv("GROQ_TOOL_RESULT_CHARS", "2000"))
     
     class Config:
         env_file = ".env"
