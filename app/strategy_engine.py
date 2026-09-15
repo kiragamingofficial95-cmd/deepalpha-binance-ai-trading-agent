@@ -197,7 +197,7 @@ class StrategyEngine:
         ai_memories = await self.get_learned_memories()
 
         if "ict" in strat_name or "market_mechanics" in strat_name:
-            return self._evaluate_ict(symbol, df, indicators, params, sl_pct, tp_pct, trailing_sl_pct)
+            return await self._evaluate_ict_full(symbol, strategy, params, sl_pct, tp_pct, trailing_sl_pct)
 
         if "momentum" in strat_name or "adaptive" in strat_name:
             return self._evaluate_adaptive_momentum(symbol, indicators, params, sl_pct, tp_pct, trailing_sl_pct, ai_memories)
@@ -208,136 +208,159 @@ class StrategyEngine:
 
         return self._evaluate_adaptive_momentum(symbol, indicators, params, sl_pct, tp_pct, trailing_sl_pct, ai_memories)
 
-    def _evaluate_ict(
+    async def _evaluate_ict_full(
         self,
         symbol: str,
-        df: pd.DataFrame,
-        ind: dict[str, Any],
+        strategy: Optional[StrategyConfig],
         params: dict[str, Any],
         sl_pct: float,
         tp_pct: float,
         trailing_sl_pct: float
     ) -> dict[str, Any]:
-        """ICT / Market Mechanics Scalping Framework evaluation."""
-        price = ind.get("price", 0.0)
-        atr = ind.get("atr", 0.0)
+        """ICT / Market Mechanics Scalping Framework — full multi-timeframe evaluation.
 
-        sw = _find_swing_highs_lows(df, lookback=3)
-        swing_highs = sw.get("swing_highs", [])
-        swing_lows = sw.get("swing_lows", [])
+        Flow: 4H macro sanity → 1H bias+structure → 15M POI (OB/FVG) → 5M A+ checklist → SL/TP with
+        minimum 2R to TP1. Matches the user's rule book exactly. Uses data from all 4 timeframes.
+        """
+        try:
+            # Fetch all timeframes: 4H, 1H, 15M, 5M
+            data = await self._fetch_multi_tf_data(symbol)
+        except Exception as e:
+            logger.error(f"ICT: failed to fetch multi-TF data for {symbol}: {e}")
+            return {"symbol": symbol, "action": "HOLD", "confidence": 0.0, "reason": f"ICT data fetch error: {e}", "indicators": {}, "ict": {}}
 
-        if not swing_highs or not swing_lows:
-            return {"symbol": symbol, "action": "HOLD", "confidence": 0.0, "reason": "Insufficient swing structure for ICT analysis", "indicators": ind, "ict": {}}
+        df_4h = data.get("4h")
+        df_1h = data.get("1h")
+        df_15m = data.get("15m")
+        df_5m = data.get("5m")
 
-        recent_high = swing_highs[-1]["price"]
-        recent_low = swing_lows[-1]["price"]
-        eq = (recent_high + recent_low) / 2
-        in_discount = price < eq
-        in_premium = price > eq
-
-        vp = _volume_profile(df)
-        ob_list = _find_order_blocks(df)
-        fvg_list = _find_fvgs(df)
-        sweep = _detect_liquidity_sweep(df, lookback=8)
-        mss = _detect_market_structure_shift(df)
-        trend = ind.get("trend_status", "RANGING")
-
-        poi = None
-        direction = None
-        for ob in reversed(ob_list):
-            if "bullish" in ob["type"] and in_discount and price >= ob["low"] * 0.998 and price <= ob["high"] * 1.002:
-                poi = ob
-                direction = "BUY"
-                break
-            if "bearish" in ob["type"] and in_premium and price >= ob["low"] * 0.998 and price <= ob["high"] * 1.002:
-                poi = ob
-                direction = "SELL"
-                break
-        if not poi:
-            for fvg in reversed(fvg_list):
-                if "bullish" in fvg["type"] and in_discount and price >= fvg["bottom"] * 0.998 and price <= fvg["top"] * 1.002:
-                    poi = fvg
-                    direction = "BUY"
-                    break
-                if "bearish" in fvg["type"] and in_premium and price >= fvg["bottom"] * 0.998 and price <= fvg["top"] * 1.002:
-                    poi = fvg
-                    direction = "SELL"
-                    break
-
-        checks_passed = 0
-        reasons = []
-
-        if direction == "BUY":
-            if in_discount:
-                checks_passed += 1
-                reasons.append("Price in discount zone")
-            if sweep.get("swept") and sweep.get("direction") == "swept_low":
-                checks_passed += 1
-                reasons.append(f"Liquidity swept at ${sweep.get('level', 0):.4f}")
-            if mss.get("shift") and mss.get("direction") == "bullish_bos":
-                checks_passed += 1
-                reasons.append("Bullish market structure shift confirmed")
-        elif direction == "SELL":
-            if in_premium:
-                checks_passed += 1
-                reasons.append("Price in premium zone")
-            if sweep.get("swept") and sweep.get("direction") == "swept_high":
-                checks_passed += 1
-                reasons.append(f"Liquidity swept at ${sweep.get('level', 0):.4f}")
-            if mss.get("shift") and mss.get("direction") == "bearish_bos":
-                checks_passed += 1
-                reasons.append("Bearish market structure shift confirmed")
-
-        if poi:
-            checks_passed += 1
-            reasons.append(f"POI active: {poi.get('type', 'unknown')}")
-
-        total_required = 4
-        confidence = round(min(checks_passed / total_required, 1.0), 2)
-
-        tp1_price = vp.get("hvn", price * (1 + tp_pct / 100.0 if direction == "BUY" else 1 - tp_pct / 100.0))
-        risk_dist = abs(price - (recent_low if direction == "BUY" else recent_high))
-        reward_dist = abs(tp1_price - price)
-        rr_ratio = round(reward_dist / (risk_dist + 1e-10), 2) if risk_dist > 0 else 0.0
-
-        ict_data = {
-            "bias": "bullish" if direction == "BUY" else "bearish" if direction == "SELL" else "unclear",
-            "swing_high": round(recent_high, 4),
-            "swing_low": round(recent_low, 4),
-            "equilibrium": round(eq, 4),
-            "volume_profile": vp,
-            "order_blocks": len(ob_list),
-            "fvgs": len(fvg_list),
-            "liquidity_sweep": sweep,
-            "market_structure_shift": mss,
-            "rr_to_tp1": rr_ratio,
-            "checks_passed": checks_passed,
-        }
-
-        if direction and checks_passed >= 3 and poi and rr_ratio >= 2.0:
-            sl_distance_pct = round((risk_dist / price) * 100, 2) if price > 0 else sl_pct
-            tp_distance_pct = round((reward_dist / price) * 100, 2) if price > 0 else tp_pct
-            entry_model = "FLIP_EM" if mss.get("shift") else "MS_EM"
+        if df_15m is None or df_1h is None or len(df_15m) < 30 or len(df_1h) < 30:
             return {
                 "symbol": symbol,
-                "action": direction,
-                "confidence": confidence,
-                "reason": " & ".join(reasons),
-                "stop_loss_pct": max(sl_distance_pct, sl_pct),
-                "take_profit_pct": max(tp_distance_pct, tp_pct),
-                "trailing_stop_pct": trailing_sl_pct,
-                "indicators": ind,
-                "ict": ict_data,
-                "entry_model": entry_model
+                "action": "HOLD",
+                "confidence": 0.0,
+                "reason": "ICT: insufficient multi-timeframe data",
+                "indicators": (analyze_all_indicators(df_15m) if df_15m is not None else {}),
+                "ict": {}
             }
+
+        ind_15m = analyze_all_indicators(df_15m)
+        price = ind_15m.get("price", 0.0)
+
+        # Phase 0 / 4H macro sanity check
+        macro = self._analyze_4h_macro(df_4h) if df_4h is not None else {"bias": "UNKNOWN"}
+
+        # Phase 1 — 1H HTF bias + structure
+        bias_1h = self._analyze_1h_bias(df_1h)
+
+        # If 1H bias is unclear → NO TRADE
+        if bias_1h.get("bias") == "unclear":
+            return {
+                "symbol": symbol,
+                "action": "HOLD",
+                "confidence": 0.0,
+                "reason": f"ICT NO TRADE: 1H bias unclear | {bias_1h.get('reason')} | 4H: {macro.get('bias')}",
+                "indicators": ind_15m,
+                "ict": {"bias_1h": bias_1h, "macro_4h": macro, "page": "PH1_BIAS"}
+            }
+
+        # If 4H macro conflicts strongly with 1H bias → NO TRADE
+        macro_bias = macro.get("bias", "neutral")
+        bias_dir = bias_1h.get("bias")
+        if macro_bias in ("bullish", "bearish") and macro_bias != bias_dir:
+            return {
+                "symbol": symbol,
+                "action": "HOLD",
+                "confidence": 0.0,
+                "reason": f"ICT NO TRADE: 4H macro ({macro_bias}) conflicts with 1H bias ({bias_dir})",
+                "indicators": ind_15m,
+                "ict": {"bias_1h": bias_1h, "macro_4h": macro, "page": "PH1_BIAS"}
+            }
+
+        # Phase 2 — 15M Target Zone: ONE clean unmitigated POI (OB or FVG)
+        poi_15m = self._analyze_15m_poi(df_15m, bias_1h)
+        if not poi_15m.get("poi"):
+            return {
+                "symbol": symbol,
+                "action": "HOLD",
+                "confidence": 0.0,
+                "reason": f"ICT NO TRADE: {poi_15m.get('reason')} | 1H bias: {bias_dir}",
+                "indicators": ind_15m,
+                "ict": {"bias_1h": bias_1h, "macro_4h": macro, "poi": poi_15m, "page": "PH2_POI"}
+            }
+
+        # Phase 4/5 — 5M entry conditions (liquidity sweep + MSS) then A+ checklist
+        entry_5m = self._analyze_5m_entry(df_5m, bias_1h, poi_15m) if df_5m is not None else {"confirmed": False, "reason": "Insufficient 5M data"}
+        a_plus = self._check_a_plus(bias_1h, poi_15m, entry_5m, ind_15m, params)
+
+        # Compute SL/TP prices
+        poi_price = poi_15m.get("poi", {}).get("mid", price)
+        if bias_dir == "bullish":
+            stop_loss = min(poi_15m["poi"].get("low", bias_1h.get("swing_low", price * 0.98)), bias_1h.get("swing_low", price * 0.98))
+            tp1_price = poi_15m.get("volume_profile", {}).get("hvn", price * (1 + tp_pct / 100.0))
+            risk_dist = abs(price - stop_loss)
+            reward_dist = abs(tp1_price - price)
+            rr_ratio = round(reward_dist / (risk_dist + 1e-10), 2) if risk_dist > 0 else 0.0
+        else:
+            stop_loss = max(poi_15m["poi"].get("high", bias_1h.get("swing_high", price * 1.02)), bias_1h.get("swing_high", price * 1.02))
+            tp1_price = poi_15m.get("volume_profile", {}).get("hvn", price * (1 - tp_pct / 100.0))
+            risk_dist = abs(stop_loss - price)
+            reward_dist = abs(price - tp1_price)
+            rr_ratio = round(reward_dist / (risk_dist + 1e-10), 2) if risk_dist > 0 else 0.0
+
+        ict_state = {
+            "page": "PH5_A_PLUS",
+            "macro_4h": macro,
+            "bias_1h": bias_1h,
+            "poi_15m": poi_15m,
+            "entry_5m": entry_5m,
+            "a_plus": a_plus,
+            "rr_to_tp1": rr_ratio,
+            "stop_loss": round(stop_loss, 4),
+            "tp1": round(tp1_price, 4)
+        }
+
+        # NO TRADE if A+ checklist fails OR RR < 2.0
+        if not a_plus.get("all_pass") or rr_ratio < 2.0:
+            reason_bits = []
+            if not a_plus.get("all_pass"):
+                failed = [k for k, v in a_plus.get("checks", {}).items() if not v]
+                reason_bits.append(f"A+ failed: {', '.join(failed)}")
+            else:
+                reason_bits.append("A+ checklist passed")
+            if rr_ratio < 2.0:
+                reason_bits.append(f"RR {rr_ratio} < 2.0")
+            return {
+                "symbol": symbol,
+                "action": "HOLD",
+                "confidence": 0.0,
+                "reason": f"ICT NO TRADE: {' | '.join(reason_bits)} | 1H bias: {bias_dir} | POI: {poi_15m.get('poi', {}).get('type', '?')}",
+                "indicators": ind_15m,
+                "ict": ict_state
+            }
+
+        # Valid setup → compute trade details
+        sl_distance_pct = round((risk_dist / price) * 100, 2) if price > 0 else sl_pct
+        tp_distance_pct = round((reward_dist / price) * 100, 2) if price > 0 else tp_pct
+        entry_model = "FLIP_EM" if entry_5m.get("confirmed") and entry_5m.get("mss", {}).get("shift") else "MS_EM"
 
         return {
             "symbol": symbol,
-            "action": "HOLD",
-            "confidence": confidence * 0.5,
-            "reason": f"ICT A+ checklist: {checks_passed}/{total_required} passed | RR: {rr_ratio} | {' & '.join(reasons) if reasons else 'No POI or structure'}",
-            "indicators": ind,
-            "ict": ict_data
+            "action": "BUY" if bias_dir == "bullish" else "SELL",
+            "confidence": 1.0,
+            "reason": (
+                f"ICT SETUP CONFIRMED: 4H macro={macro.get('bias')} | 1H bias={bias_dir} (invalid below/above {bias_1h.get('invalid_at')}) | "
+                f"POI={poi_15m.get('poi', {}).get('type')} | {entry_5m.get('reason')} | A+ {a_plus.get('passed')}/{a_plus.get('total')} | RR={rr_ratio}"
+            ),
+            "stop_loss_pct": max(sl_distance_pct, sl_pct),
+            "take_profit_pct": max(tp_distance_pct, tp_pct),
+            "trailing_stop_pct": trailing_sl_pct,
+            "indicators": ind_15m,
+            "ict": ict_state,
+            "entry_model": entry_model,
+            "stop_loss_price": round(stop_loss, 4),
+            "take_profit_price": round(tp1_price, 4),
+            "rr_ratio": rr_ratio
         }
 
     def _evaluate_adaptive_momentum(

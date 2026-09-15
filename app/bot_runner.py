@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 import logging
 from typing import Any, Optional
 from app.config import settings
@@ -172,18 +173,28 @@ class BotRunner:
         })
 
     async def _handle_buy_signal(self, symbol: str, signal: dict[str, Any], strategy: Any):
-        # 1. Check risk manager validation
+        # Get strategy-specific risk settings (fallback to global settings)
+        risk = json.loads(strategy.risk_settings) if strategy and strategy.risk_settings else {}
+        max_open = int(risk.get("max_open_positions", settings.MAX_OPEN_POSITIONS))
+        max_daily_loss = float(risk.get("max_daily_loss_pct", settings.MAX_DAILY_LOSS_PERCENT))
+        max_daily_trades = int(risk.get("max_daily_trades", 2))
+        max_daily_losses = int(risk.get("max_daily_losses", 2))
+        risk_amount = float(risk.get("risk_amount_usd", 0)) or None
+
+        # 1. Check risk manager validation with daily limits
         risk_check = await risk_manager.can_open_trade(
             symbol=symbol,
-            max_open_positions=settings.MAX_OPEN_POSITIONS,
-            max_daily_loss_pct=settings.MAX_DAILY_LOSS_PERCENT
+            max_open_positions=max_open,
+            max_daily_loss_pct=max_daily_loss,
+            max_daily_trades=max_daily_trades,
+            max_daily_losses=max_daily_losses
         )
 
         if not risk_check["allowed"]:
             self.log_event("WARNING", f"BUY signal on {symbol} skipped: {risk_check['reason']}")
             return
 
-        # 2. Calculate position size
+        # 2. Calculate position size (use fixed USD risk if configured)
         current_price = signal.get("indicators", {}).get("price", 0.0)
         sl_pct = signal.get("stop_loss_pct", settings.DEFAULT_STOP_LOSS_PCT)
         tp_pct = signal.get("take_profit_pct", settings.DEFAULT_TAKE_PROFIT_PCT)
@@ -195,7 +206,8 @@ class BotRunner:
                 total_balance=balance,
                 entry_price=current_price,
                 stop_loss_pct=sl_pct,
-                risk_per_trade_pct=settings.RISK_PER_TRADE_PERCENT
+                risk_per_trade_pct=float(risk.get("risk_per_trade_pct", settings.RISK_PER_TRADE_PERCENT)),
+                risk_amount_usd=risk_amount
             )
 
             if size_usdt <= 10.0 or size_usdt > balance:
@@ -233,7 +245,8 @@ class BotRunner:
                 total_balance=usdt_bal,
                 entry_price=current_price,
                 stop_loss_pct=sl_pct,
-                risk_per_trade_pct=settings.RISK_PER_TRADE_PERCENT
+                risk_per_trade_pct=float(risk.get("risk_per_trade_pct", settings.RISK_PER_TRADE_PERCENT)),
+                risk_amount_usd=risk_amount
             )
 
             if size_usdt < 15.0 or size_usdt > usdt_bal:

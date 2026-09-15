@@ -14,6 +14,8 @@ class RiskManager:
     - Dynamic position sizing (Fixed Fractional Risk based on Stop-Loss distance)
     - Max open positions limit
     - Single asset concentration cap (no more than 30% of total equity in one asset)
+    - Daily trade limit (max 2 trades/day)
+    - Daily loss limit (max 2 losses/day)
     """
 
     async def check_daily_drawdown(self, max_daily_loss_pct: float = 5.0) -> dict[str, Any]:
@@ -47,23 +49,59 @@ class RiskManager:
                 "reason": f"Daily loss ${abs(realized_today):.2f} exceeded limit ${max_loss_dollar:.2f}" if is_tripped else "Normal"
             }
 
+    async def check_daily_limits(self, max_daily_trades: int = 2, max_daily_losses: int = 2) -> dict[str, Any]:
+        """
+        Checks today's trade count and loss count against daily limits.
+        Returns {"allowed": bool, "reason": str, "trades_today": int, "losses_today": int}
+        """
+        today_start = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        async with AsyncSessionLocal() as session:
+            # Count trades opened today
+            trades_res = await session.execute(
+                select(Trade)
+                .where(Trade.entry_time >= today_start)
+            )
+            trades_today = trades_res.scalars().all()
+            trade_count = len(trades_today)
+            
+            # Count losses today
+            loss_count = sum(1 for t in trades_today if t.status == "CLOSED" and t.pnl <= 0)
+            
+            if trade_count >= max_daily_trades:
+                return {"allowed": False, "reason": f"Max daily trades reached ({trade_count}/{max_daily_trades})", "trades_today": trade_count, "losses_today": loss_count}
+            
+            if loss_count >= max_daily_losses:
+                return {"allowed": False, "reason": f"Max daily losses reached ({loss_count}/{max_daily_losses}) — STOP TRADING", "trades_today": trade_count, "losses_today": loss_count}
+            
+            return {"allowed": True, "reason": "Daily limits OK", "trades_today": trade_count, "losses_today": loss_count}
+
     async def calculate_position_size(
         self,
         total_balance: float,
         entry_price: float,
         stop_loss_pct: float = 1.5,
-        risk_per_trade_pct: float = 2.0
+        risk_per_trade_pct: float = 2.0,
+        risk_amount_usd: float = None  # If provided, use fixed USD risk (Rs.10 converted)
     ) -> float:
         """
         Calculates the exact USDT position size so that if Stop-Loss is hit,
         the total loss equals exactly `risk_per_trade_pct` of total portfolio balance.
         Formula: Position Size USDT = (Balance * Risk_Pct) / (SL_Pct)
         Capped at 25% of total balance for prudent risk management.
+        
+        If risk_amount_usd is provided (e.g., Rs.10 converted to USD), it overrides risk_per_trade_pct.
         """
         if stop_loss_pct <= 0 or entry_price <= 0:
             return round(total_balance * 0.05, 2)
 
-        risk_amount_dollar = total_balance * (risk_per_trade_pct / 100.0)
+        if risk_amount_usd is not None:
+            # Use fixed USD risk amount (Rs.10 converted)
+            risk_amount_dollar = risk_amount_usd
+        else:
+            # Percentage-based risk
+            risk_amount_dollar = total_balance * (risk_per_trade_pct / 100.0)
+
         target_size_usdt = risk_amount_dollar / (stop_loss_pct / 100.0)
 
         # Cap at maximum 25% of portfolio per trade, minimum $15
@@ -77,7 +115,9 @@ class RiskManager:
         self,
         symbol: str,
         max_open_positions: int = 5,
-        max_daily_loss_pct: float = 5.0
+        max_daily_loss_pct: float = 5.0,
+        max_daily_trades: int = 2,
+        max_daily_losses: int = 2
     ) -> dict[str, Any]:
         """
         Runs comprehensive pre-trade validation checks.
@@ -90,8 +130,13 @@ class RiskManager:
                 "reason": f"Daily Circuit Breaker active: {dd_check['reason']}"
             }
 
+        # 2. Daily trade/loss limits
+        daily_check = await self.check_daily_limits(max_daily_trades, max_daily_losses)
+        if not daily_check["allowed"]:
+            return {"allowed": False, "reason": daily_check["reason"]}
+
         async with AsyncSessionLocal() as session:
-            # 2. Check total open positions count
+            # 3. Check total open positions count
             open_res = await session.execute(
                 select(Trade).where(Trade.status == "OPEN")
             )
@@ -103,7 +148,7 @@ class RiskManager:
                     "reason": f"Max open positions reached ({len(open_trades)}/{max_open_positions})"
                 }
 
-            # 3. Check if already open on this symbol
+            # 4. Check if already open on this symbol
             existing_symbol_trade = next((t for t in open_trades if t.symbol == symbol), None)
             if existing_symbol_trade:
                 return {
@@ -111,7 +156,7 @@ class RiskManager:
                     "reason": f"Active position already open for {symbol} (#{existing_symbol_trade.id})"
                 }
 
-        return {"allowed": True, "reason": "Pre-trade risk criteria satisfied"}
+        return {"allowed": True, "reason": "Pre-trade risk criteria satisfied", "daily": daily_check}
 
 
 risk_manager = RiskManager()
