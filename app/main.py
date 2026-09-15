@@ -23,6 +23,7 @@ from app.strategy_engine import strategy_engine
 from app.ai_agent import ai_agent
 from app.bot_runner import bot_runner
 from app.analytics import analytics_engine
+from app.binance_client import binance_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -437,7 +438,7 @@ async def get_klines(symbol: str = "BTCUSDT", timeframe: str = "15m", limit: int
     candles = []
     for _, row in df.iterrows():
         candles.append({
-            "time": int(row["timestamp"] / 1000),  # TradingView requires seconds unix timestamp
+            "time": int(row["timestamp"] / 1000),
             "open": float(row["open"]),
             "high": float(row["high"]),
             "low": float(row["low"]),
@@ -445,6 +446,31 @@ async def get_klines(symbol: str = "BTCUSDT", timeframe: str = "15m", limit: int
             "volume": float(row["volume"])
         })
     return {"symbol": symbol, "timeframe": timeframe, "candles": candles}
+
+
+@app.get("/api/diagnose/mtf/{symbol}")
+async def diagnose_mtf(symbol: str):
+    """Diagnose multi-timeframe data fetching for a symbol."""
+    from app.strategy_engine import strategy_engine
+    data = await strategy_engine._fetch_multi_tf_data(symbol)
+    result = {}
+    for tf, df in data.items():
+        if df is not None and not df.empty:
+            result[tf] = {
+                "rows": len(df),
+                "columns": list(df.columns),
+                "latest": {
+                    "time": int(df["timestamp"].iloc[-1]) if "timestamp" in df.columns else None,
+                    "open": float(df["open"].iloc[-1]),
+                    "high": float(df["high"].iloc[-1]),
+                    "low": float(df["low"].iloc[-1]),
+                    "close": float(df["close"].iloc[-1]),
+                    "volume": float(df["volume"].iloc[-1])
+                }
+            }
+        else:
+            result[tf] = {"error": "empty or None"}
+    return {"symbol": symbol, "timeframes": result}
 
 
 # ==========================================
