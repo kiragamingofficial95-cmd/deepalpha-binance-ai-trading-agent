@@ -196,6 +196,40 @@ class AIAgent:
         self.api_key = settings.GROQ_API_KEY
         self.model = settings.GROQ_MODEL
 
+    @staticmethod
+    def _sanitize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
+        """
+        Ensure every tool call matches the shape Groq requires for assistant messages:
+        {id, type, function: {name, arguments}}. Drop malformed leftovers (e.g. persisted
+        tool_executed entries) instead of sending them back to the API.
+        """
+        if not isinstance(tool_calls, list):
+            return []
+        clean: list[dict[str, Any]] = []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") if isinstance(call.get("function"), dict) else None
+            if not fn:
+                # Try the {id,type,function} wrapper; otherwise drop.
+                continue
+            name = fn.get("name")
+            args = fn.get("arguments")
+            if not name:
+                continue
+            if not isinstance(args, str):
+                try:
+                    args = json.dumps(args or {}, ensure_ascii=False, default=str)
+                except Exception:
+                    args = "{}"
+            call_id = call.get("id") or f"call_{abs(hash(name)) % 1000000007}"
+            clean.append({
+                "id": str(call_id),
+                "type": call.get("type") or "function",
+                "function": {"name": str(name), "arguments": args}
+            })
+        return clean
+
     def _compact_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Enforce a hard input-token budget so requests never exceed model limits (avoids 413)."""
         max_tokens = settings.GROQ_MAX_INPUT_TOKENS
@@ -218,16 +252,17 @@ class AIAgent:
             if "content" in msg and isinstance(msg["content"], str):
                 msg["content"] = _bounded_chars(msg["content"], min(content_budget * 4, per_msg_chars))
             elif "tool_calls" in msg:
-                # Shrink tool call arguments (which embed prior tool results)
-                try:
-                    calls = json.loads(json.dumps(msg["tool_calls"]))
-                    for call in calls if isinstance(calls, list) else []:
-                        fn = call.get("function") if isinstance(call, dict) else None
-                        if fn and isinstance(fn.get("arguments"), str):
+                # Repair/shape tool calls the way Groq expects them
+                calls = self._sanitize_tool_calls(msg.get("tool_calls"))
+                if calls:
+                    # Shrink oversized arguments strings
+                    for call in calls:
+                        fn = call.get("function")
+                        if fn and isinstance(fn.get("arguments"), str) and len(fn["arguments"]) > 1500:
                             fn["arguments"] = _bounded_chars(fn["arguments"], 1500)
                     msg["tool_calls"] = calls
-                except Exception:
-                    pass
+                else:
+                    msg.pop("tool_calls", None)
             elif "content" in msg and not isinstance(msg["content"], str):
                 msg["content"] = _bounded_chars(
                     json.dumps(msg["content"], ensure_ascii=False, default=str), content_budget * 4
@@ -576,13 +611,17 @@ class AIAgent:
             else:
                 final_content = assistant_msg.content or "Understood."
 
-            # Save assistant reply to database
+            # Save assistant reply to database.
+            # tool_calls column stores ONLY the Groq-compatible call shape so history
+            # replays cleanly; full execution details stay in tools_executed (response only).
             async with AsyncSessionLocal() as session:
                 session.add(ChatMessage(
                     session_id=session_id,
                     role="assistant",
                     content=final_content,
-                    tool_calls=json.dumps(tools_executed) if tools_executed else None,
+                    tool_calls=(
+                        json.dumps(self._sanitize_tool_calls(tool_calls_data)) if tool_calls_data else None
+                    ),
                     timestamp=datetime.datetime.utcnow()
                 ))
                 await session.commit()
