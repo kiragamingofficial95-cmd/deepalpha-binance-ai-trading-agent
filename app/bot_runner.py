@@ -126,11 +126,13 @@ class BotRunner:
         strategies = await strategy_engine.get_active_strategies()
 
         # 3. Iterate strategies, then their assigned symbols (or all watchlist if none assigned)
+        evaluated_this_cycle: set[str] = set()
         for strategy in strategies:
             timeframe = strategy.timeframe if strategy else "15m"
             target_symbols = [s for s in self.watchlist if strategy_engine.strategy_applies_to(strategy, s, self.watchlist)]
 
             for symbol in target_symbols:
+                evaluated_this_cycle.add(symbol)
                 try:
                     # Fetch recent candles
                     df = await binance_client.fetch_klines(symbol, timeframe=timeframe, limit=100)
@@ -151,6 +153,12 @@ class BotRunner:
 
                 except Exception as e:
                     logger.error(f"Error analyzing symbol {symbol} ({strategy.name if strategy else '?'}): {e}")
+
+        # Prune stale signal entries for symbols no longer evaluated by any strategy
+        self.latest_signals = {k: v for k, v in self.latest_signals.items() if k in evaluated_this_cycle}
+        if not evaluated_this_cycle and strategies:
+            # No strategy matched any watchlist symbol — keep cycle alive but log once
+            self.log_event("WARNING", "No watchlist symbols are assigned to any active strategy. Update strategy symbols in the Strategies tab.")
 
         # Broadcast general tick
         self.broadcast_event({
