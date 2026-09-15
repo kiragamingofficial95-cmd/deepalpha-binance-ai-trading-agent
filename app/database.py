@@ -226,6 +226,34 @@ async def init_db():
         if not strat_res.scalars().first():
             default_strategies = [
                 StrategyConfig(
+                    name="ict_market_mechanics",
+                    display_name="ICT / Market Mechanics Scalping Framework",
+                    description="Rule-based ICT framework using market structure, liquidity sweeps, order blocks, FVGs, Volume Profile, and multi-timeframe analysis. Strict A+ checklist with 2R minimum, set-and-forget management.",
+                    is_active=True,
+                    timeframe="15m",
+                    parameters=json.dumps({
+                        "swing_lookback": 3,
+                        "entry_models": ["FLIP_EM", "MS_EM"],
+                        "min_rr_to_tp1": 2.0,
+                        "max_daily_trades": 2,
+                        "max_daily_losses": 2,
+                        "risk_amount_inr": 10,
+                        "max_leverage": 10,
+                        "margin_mode": "ISOLATED",
+                        "order_type": "LIMIT_ONLY",
+                        "no_session_restriction": True,
+                        "volume_profile_bins": 15
+                    }),
+                    custom_prompt="Follow the ICT Market Mechanics Scalping Framework exactly. 4H macro sanity, 1H bias+structure, 15M POI (OB/FVG) with Volume Profile confluence, 5M A+ checklist, 1M entry on candle close only. Minimum 2R to TP1. Set-and-forget. Max 2 trades/day, max 2 losses/day.",
+                    risk_settings=json.dumps({
+                        "risk_per_trade_pct": 2.0,
+                        "stop_loss_pct": 1.5,
+                        "take_profit_pct": 3.0,
+                        "trailing_stop_pct": 1.0,
+                        "risk_amount_usd": 10.0
+                    })
+                ),
+                StrategyConfig(
                     name="ai_adaptive_momentum",
                     display_name="AI Adaptive Momentum & Trend",
                     description="Dynamically evaluates RSI, MACD, EMA 20/50 crossovers and market regime with Groq AI self-tuning.",
