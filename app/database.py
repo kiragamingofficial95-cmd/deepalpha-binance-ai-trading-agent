@@ -257,7 +257,7 @@ async def init_db():
                     name="ai_adaptive_momentum",
                     display_name="AI Adaptive Momentum & Trend",
                     description="Dynamically evaluates RSI, MACD, EMA 20/50 crossovers and market regime with Groq AI self-tuning.",
-                    is_active=True,
+                    is_active=False,
                     timeframe="15m",
                     parameters=json.dumps({
                         "rsi_period": 14,
