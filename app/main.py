@@ -123,6 +123,11 @@ class StrategyUpdateRequest(BaseModel):
     parameters: Optional[dict[str, Any]] = None
     risk_settings: Optional[dict[str, Any]] = None
     custom_prompt: Optional[str] = None
+    symbols: Optional[list[str]] = None
+
+class StrategySymbolsRequest(BaseModel):
+    strategy_id: int
+    symbols: list[str] = []
 
 class MemoryCreateRequest(BaseModel):
     title: str
@@ -517,12 +522,34 @@ async def update_strategy(payload: StrategyUpdateRequest):
             strat.risk_settings = json.dumps(payload.risk_settings)
         if payload.custom_prompt is not None:
             strat.custom_prompt = payload.custom_prompt
+        if payload.symbols is not None:
+            clean_syms = [s.strip().upper().replace("/", "") for s in payload.symbols if s and s.strip()]
+            strat.symbols = json.dumps(clean_syms)
 
         strat.version += 1
         strat.updated_at = datetime.datetime.utcnow()
         await session.commit()
         await session.refresh(strat)
         return {"success": True, "strategy": strat.to_dict()}
+
+@app.post("/api/strategies/symbols")
+async def set_strategy_symbols(payload: StrategySymbolsRequest):
+    """Restrict a strategy to a specific coin or group of coins ([] = all watchlist symbols)."""
+    async with AsyncSessionLocal() as session:
+        res = await session.execute(select(StrategyConfig).where(StrategyConfig.id == payload.strategy_id))
+        strat = res.scalar_one_or_none()
+        if not strat:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+
+        clean_syms = [s.strip().upper().replace("/", "") for s in payload.symbols if s and s.strip()]
+        strat.symbols = json.dumps(clean_syms)
+        strat.updated_at = datetime.datetime.utcnow()
+        await session.commit()
+        await session.refresh(strat)
+
+        target_display = ", ".join(clean_syms) if clean_syms else "ALL WATCHLIST"
+        bot_runner.log_event("INFO", f"Strategy '{strat.display_name}' now applies to: {target_display}")
+        return {"success": True, "message": f"Strategy symbols updated: {target_display}", "strategy": strat.to_dict()}
 
 @app.get("/api/memories")
 async def get_memories():

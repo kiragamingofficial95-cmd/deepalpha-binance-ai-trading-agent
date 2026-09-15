@@ -140,6 +140,38 @@ class StrategyEngine:
                 strategy = res_all.scalars().first()
             return strategy
 
+    async def get_active_strategies(self) -> list[StrategyConfig]:
+        """Return all active strategies (supports running multiple strategies in parallel)."""
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(
+                select(StrategyConfig).where(StrategyConfig.is_active == True)
+            )
+            strategies = list(res.scalars().all())
+            if not strategies:
+                res_all = await session.execute(select(StrategyConfig))
+                all_strats = list(res_all.scalars().all())
+                return [all_strats[0]] if all_strats else []
+            return strategies
+
+    @staticmethod
+    def strategy_symbols(strategy: Optional[StrategyConfig]) -> list[str]:
+        """Returns the list of target symbols configured for a strategy ([] = all watchlist)."""
+        if not strategy or not getattr(strategy, "symbols", None):
+            return []
+        try:
+            syms = json.loads(strategy.symbols)
+            return [s.strip().upper().replace("/", "") for s in syms if isinstance(s, str) and s.strip()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def strategy_applies_to(strategy: Optional[StrategyConfig], symbol: str, watchlist: list[str]) -> bool:
+        """True if the strategy should evaluate/trade this symbol."""
+        syms = StrategyEngine.strategy_symbols(strategy)
+        if not syms:
+            return symbol in watchlist
+        return symbol.upper().replace("/", "") in syms
+
     async def evaluate_symbol(
         self,
         symbol: str,

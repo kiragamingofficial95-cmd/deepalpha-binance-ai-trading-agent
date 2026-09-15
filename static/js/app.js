@@ -8,6 +8,8 @@ class DashboardApp {
         this.symbolPnlChart = null;
         this.currentSymbol = "BTCUSDT";
         this.activeTab = "terminal";
+        this.watchlist = [];
+        this._strategiesFetched = false;
 
         this.init();
     }
@@ -19,7 +21,6 @@ class DashboardApp {
         this.fetchStatus();
         this.fetchBalances();
         this.fetchTrades();
-        this.fetchStrategies();
         this.fetchAnalytics();
         this.fetchGroqModels();
         this.startPeriodicUpdates();
@@ -214,6 +215,11 @@ class DashboardApp {
             if (data.success) {
                 this.isRunning = data.bot.is_running;
                 this.tradingMode = data.bot.trading_mode;
+                this.watchlist = data.bot.watchlist || this.watchlist;
+                if (!this._strategiesFetched && this.watchlist.length > 0) {
+                    this._strategiesFetched = true;
+                    this.fetchStrategies();
+                }
                 this.updateUIStatus(data);
             }
         } catch (e) {
@@ -743,6 +749,28 @@ class DashboardApp {
                         <span class="text-indigo-400 font-bold block mb-1">Active Parameters:</span>
                         ${JSON.stringify(s.parameters, null, 2)}
                     </div>
+                    <div class="mt-3 p-3 rounded-lg bg-black/30 border border-white/5 text-xs">
+                        <div class="flex items-center justify-between mb-2">
+                            <span class="text-indigo-400 font-bold">Applied Symbols</span>
+                            <button onclick="window.dashboardApp.saveStrategySymbols(${s.id})" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-semibold transition cursor-pointer">Save Symbols</button>
+                        </div>
+                        <div class="flex items-center gap-1.5 mb-1.5 flex-wrap">
+                            <span class="text-[10px] text-emerald-300 font-semibold ${(!s.symbols || s.symbols.length === 0) ? '' : 'hidden'}" id="allBadge_${s.id}">APPLIES TO ALL WATCHLIST SYMBOLS</span>
+                            <span class="text-[10px] text-amber-300 font-semibold ${(!s.symbols || s.symbols.length === 0) ? 'hidden' : ''}" id="customBadge_${s.id}">CUSTOM: ${(s.symbols || []).join(', ')}</span>
+                        </div>
+                        <div id="symbolSelect_${s.id}" class="flex flex-wrap gap-2">
+                            <label class="flex items-center space-x-1.5 px-2 py-1 rounded-lg bg-slate-800/70 border border-white/10 cursor-pointer hover:border-indigo-500/50 transition">
+                                <input type="checkbox" class="rounded accent-indigo-500 cursor-pointer" data-strategy="${s.id}" data-symbol="__ALL__" ${(!s.symbols || s.symbols.length === 0) ? 'checked' : ''}>
+                                <span class="font-mono text-indigo-300 font-bold">ALL</span>
+                            </label>
+                            ${this.watchlist.map(sym => `
+                                <label class="flex items-center space-x-1.5 px-2 py-1 rounded-lg bg-slate-800/70 border border-white/10 cursor-pointer hover:border-indigo-500/50 transition">
+                                    <input type="checkbox" class="rounded accent-indigo-500 cursor-pointer" data-strategy="${s.id}" data-symbol="${sym}" ${(s.symbols || []).includes(sym) ? 'checked' : ''}>
+                                    <span class="font-mono text-gray-300">${sym}</span>
+                                </label>
+                            `).join('')}
+                        </div>
+                    </div>
                 </div>
             `).join("");
         } catch (e) {
@@ -757,6 +785,34 @@ class DashboardApp {
             this.showToast("Strategy Switched", "Active bot strategy updated");
         } catch (e) {
             console.error("Activate strategy error:", e);
+        }
+    }
+
+    async saveStrategySymbols(id) {
+        const container = document.getElementById(`symbolSelect_${id}`);
+        if (!container) return;
+
+        const allBox = container.querySelector('input[data-symbol="__ALL__"]');
+        let symbols;
+        if (allBox && allBox.checked) {
+            symbols = []; // empty = applies to ALL watchlist symbols
+        } else {
+            symbols = Array.from(container.querySelectorAll('input[data-symbol]:checked'))
+                .map(cb => cb.dataset.symbol);
+        }
+
+        try {
+            const res = await fetch("/api/strategies/symbols", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ strategy_id: id, symbols })
+            });
+            const data = await res.json();
+            this.showToast("Symbols Updated", data.message || "Strategy symbols saved");
+            this.fetchStrategies();
+        } catch (e) {
+            console.error("Save strategy symbols error:", e);
+            this.showToast("Error", "Could not save strategy symbols");
         }
     }
 

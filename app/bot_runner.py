@@ -122,31 +122,35 @@ class BotRunner:
                 self.log_event("INFO", f"Trigger Closed Trade #{c['id']} ({c['symbol']}): {pnl_str} ({c['exit_reason']})", meta=c)
                 self.broadcast_event({"type": "TRADE_CLOSED", "data": c})
 
-        # 2. Get active strategy
-        active_strategy = await strategy_engine.get_active_strategy()
-        timeframe = active_strategy.timeframe if active_strategy else "15m"
+        # 2. Get active strategies (multi-strategy support: each applies to its own symbols)
+        strategies = await strategy_engine.get_active_strategies()
 
-        # 3. Iterate over watchlist symbols
-        for symbol in self.watchlist:
-            try:
-                # Fetch recent candles
-                df = await binance_client.fetch_klines(symbol, timeframe=timeframe, limit=100)
-                if df.empty:
-                    continue
+        # 3. Iterate strategies, then their assigned symbols (or all watchlist if none assigned)
+        for strategy in strategies:
+            timeframe = strategy.timeframe if strategy else "15m"
+            target_symbols = [s for s in self.watchlist if strategy_engine.strategy_applies_to(strategy, s, self.watchlist)]
 
-                # Evaluate strategy signals
-                signal = await strategy_engine.evaluate_symbol(symbol, df, active_strategy)
-                self.latest_signals[symbol] = signal
+            for symbol in target_symbols:
+                try:
+                    # Fetch recent candles
+                    df = await binance_client.fetch_klines(symbol, timeframe=timeframe, limit=100)
+                    if df.empty:
+                        continue
 
-                # Broadcast signal update
-                self.broadcast_event({"type": "SIGNAL_UPDATE", "data": signal})
+                    # Evaluate strategy signals
+                    signal = await strategy_engine.evaluate_symbol(symbol, df, strategy)
+                    signal["strategy"] = strategy.name if strategy else "ai_adaptive_momentum"
+                    self.latest_signals[symbol] = signal
 
-                # Check if actionable BUY or SELL signal
-                if signal.get("action") == "BUY" and signal.get("confidence", 0) >= 0.65:
-                    await self._handle_buy_signal(symbol, signal, active_strategy)
+                    # Broadcast signal update
+                    self.broadcast_event({"type": "SIGNAL_UPDATE", "data": signal})
 
-            except Exception as e:
-                logger.error(f"Error analyzing symbol {symbol}: {e}")
+                    # Check if actionable BUY or SELL signal
+                    if signal.get("action") == "BUY" and signal.get("confidence", 0) >= 0.65:
+                        await self._handle_buy_signal(symbol, signal, strategy)
+
+                except Exception as e:
+                    logger.error(f"Error analyzing symbol {symbol} ({strategy.name if strategy else '?'}): {e}")
 
         # Broadcast general tick
         self.broadcast_event({

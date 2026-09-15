@@ -154,6 +154,7 @@ class StrategyConfig(Base):
     parameters = Column(Text, default="{}")
     custom_prompt = Column(Text, default="")
     risk_settings = Column(Text, default="{}")
+    symbols = Column(Text, default="[]")  # JSON list of target symbols; [] = all watchlist
     
     version = Column(Integer, default=1)
     total_trades = Column(Integer, default=0)
@@ -174,6 +175,7 @@ class StrategyConfig(Base):
             "parameters": json.loads(self.parameters) if self.parameters else {},
             "custom_prompt": self.custom_prompt,
             "risk_settings": json.loads(self.risk_settings) if self.risk_settings else {},
+            "symbols": json.loads(self.symbols) if self.symbols else [],
             "version": self.version,
             "total_trades": self.total_trades,
             "win_count": self.win_count,
@@ -212,6 +214,13 @@ class PaperBalance(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        
+        # Lightweight migration: add `symbols` column to strategy_configs if missing
+        def _migrate_strategy_symbols(sync_conn):
+            cols = sync_conn.exec_driver_sql("PRAGMA table_info(strategy_configs)").fetchall()
+            if not any(c[1] == "symbols" for c in cols):
+                sync_conn.exec_driver_sql("ALTER TABLE strategy_configs ADD COLUMN symbols TEXT DEFAULT '[]'")
+        await conn.run_sync(_migrate_strategy_symbols)
     
     # Initialize default strategies and paper balance if not existing
     async with AsyncSessionLocal() as session:
