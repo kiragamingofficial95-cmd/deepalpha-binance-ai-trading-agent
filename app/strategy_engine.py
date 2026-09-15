@@ -5,6 +5,7 @@ import pandas as pd
 from sqlalchemy import select
 from app.database import AsyncSessionLocal, StrategyConfig, StrategyMemory
 from app.indicators import analyze_all_indicators, calculate_atr, calculate_ema
+from app.binance_client import binance_client
 
 logger = logging.getLogger("strategy_engine")
 

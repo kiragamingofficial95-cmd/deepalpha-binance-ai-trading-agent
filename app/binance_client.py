@@ -178,7 +178,7 @@ class BinanceClient:
                         for col in ['open', 'high', 'low', 'close', 'volume']:
                             df[col] = df[col].astype(float)
                         df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
-                        logger.info(f"fetch_klines {symbol} {tf}: gateway={base_url} rows={len(df)}")
+                        logger.info(f"fetch_klines {symbol} {timeframe}: gateway={base_url} rows={len(df)}")
                         return df
                     else:
                         logger.warning(f"fetch_klines {symbol} {timeframe}: gateway={base_url} returned empty raw_data")
