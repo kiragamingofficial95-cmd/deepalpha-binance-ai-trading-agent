@@ -45,18 +45,63 @@ class Trade(Base):
     take_profit = Column(Float, nullable=True)
     trailing_stop_pct = Column(Float, nullable=True)
     highest_price = Column(Float, nullable=True)
+    lowest_price = Column(Float, nullable=True)
     
-    status = Column(String(20), default="OPEN", index=True)  # OPEN, CLOSED, CANCELLED
+    status = Column(String(20), default="OPEN", index=True)  # OPEN, CLOSED, CANCELLED, REJECTED
     strategy_name = Column(String(50), default="AI_Adaptive", index=True)
     strategy_version = Column(Integer, default=1)
     
     entry_reason = Column(Text, default="")
     exit_reason = Column(Text, default="")
+    exit_reason_enum = Column(String(30), nullable=True)  # TP, SL, BREAKEVEN, TRAILING_STOP, MANUAL_PAPER_CLOSE, TIMEOUT, REJECTED_RR, REJECTED_LLM, REJECTED_CORRELATED, REJECTED_DUPLICATE
     technical_snapshot = Column(Text, default="{}")  # JSON of indicators at entry
     
     entry_time = Column(DateTime, default=datetime.datetime.utcnow, index=True)
     exit_time = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    
+    # RR tracking
+    structural_rr = Column(Float, nullable=True)  # Theoretical RR from market structure
+    estimated_executable_rr = Column(Float, nullable=True)  # Pre-fill estimated RR
+    executable_rr = Column(Float, nullable=True)  # Actual RR after fill (authoritative)
+    realized_r = Column(Float, nullable=True)  # Actual closed PnL / initial risk
+    
+    # MFE/MAE tracking
+    mfe = Column(Float, default=0.0)  # Maximum favorable excursion (USD)
+    mae = Column(Float, default=0.0)  # Maximum adverse excursion (USD)
+    mfe_r = Column(Float, default=0.0)  # MFE in R units
+    mae_r = Column(Float, default=0.0)  # MAE in R units
+    
+    # Setup tracking
+    setup_id = Column(String(100), index=True, nullable=True)
+    correlation_group = Column(String(30), nullable=True)
+    
+    # Risk tracking
+    initial_risk_usd = Column(Float, nullable=True)
+    risk_usd = Column(Float, nullable=True)
+    fees_estimate = Column(Float, nullable=True)
+    slippage_estimate = Column(Float, nullable=True)
+    
+    # LLM tracking
+    llm_decision = Column(String(10), nullable=True)  # PASS, FAIL, WAIT
+    llm_confidence = Column(Float, nullable=True)
+    llm_model = Column(String(50), nullable=True)
+    llm_reasoning = Column(Text, nullable=True)
+    llm_prompt_version = Column(String(20), nullable=True)
+    
+    # Rule engine tracking (for LLM impact analysis)
+    rule_engine_decision = Column(String(10), nullable=True)  # PASS, FAIL
+    
+    # Market state snapshot
+    market_state_snapshot = Column(Text, nullable=True)  # JSON of 4H/1H/15M/5M data
+    
+    # Timing
+    confirmation_candle_timestamp = Column(DateTime, nullable=True)
+    
+    # Break-even tracking
+    be_triggered = Column(Boolean, default=False)
+    be_timestamp = Column(DateTime, nullable=True)
+    be_price = Column(Float, nullable=True)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,12 +124,31 @@ class Trade(Base):
             "strategy_version": self.strategy_version,
             "entry_reason": self.entry_reason,
             "exit_reason": self.exit_reason,
+            "exit_reason_enum": self.exit_reason_enum,
             "entry_time": self.entry_time.isoformat() if self.entry_time else None,
             "exit_time": self.exit_time.isoformat() if self.exit_time else None,
             "duration_minutes": (
                 round((self.exit_time - self.entry_time).total_seconds() / 60, 1)
                 if self.exit_time and self.entry_time else None
-            )
+            ),
+            # New fields
+            "structural_rr": round(self.structural_rr, 2) if self.structural_rr else None,
+            "estimated_executable_rr": round(self.estimated_executable_rr, 2) if self.estimated_executable_rr else None,
+            "executable_rr": round(self.executable_rr, 2) if self.executable_rr else None,
+            "realized_r": round(self.realized_r, 2) if self.realized_r else None,
+            "mfe": round(self.mfe, 2),
+            "mae": round(self.mae, 2),
+            "mfe_r": round(self.mfe_r, 2),
+            "mae_r": round(self.mae_r, 2),
+            "setup_id": self.setup_id,
+            "correlation_group": self.correlation_group,
+            "initial_risk_usd": round(self.initial_risk_usd, 2) if self.initial_risk_usd else None,
+            "risk_usd": round(self.risk_usd, 2) if self.risk_usd else None,
+            "llm_decision": self.llm_decision,
+            "llm_confidence": self.llm_confidence,
+            "llm_model": self.llm_model,
+            "rule_engine_decision": self.rule_engine_decision,
+            "be_triggered": self.be_triggered,
         }
 
 
@@ -156,6 +220,15 @@ class StrategyConfig(Base):
     risk_settings = Column(Text, default="{}")
     symbols = Column(Text, default="[]")  # JSON list of target symbols; [] = all watchlist
     
+    # Correlation settings
+    correlation_group = Column(String(30), default="CRYPTO_MAJOR")
+    max_correlated_risk_pct = Column(Float, default=3.0)  # Max % of equity in correlated positions
+    
+    # LLM settings
+    llm_prompt_version = Column(String(20), default="v1")
+    llm_model = Column(String(50), nullable=True)
+    llm_temperature = Column(Float, default=0.2)
+    
     version = Column(Integer, default=1)
     total_trades = Column(Integer, default=0)
     win_count = Column(Integer, default=0)
@@ -176,6 +249,11 @@ class StrategyConfig(Base):
             "custom_prompt": self.custom_prompt,
             "risk_settings": json.loads(self.risk_settings) if self.risk_settings else {},
             "symbols": json.loads(self.symbols) if self.symbols else [],
+            "correlation_group": self.correlation_group,
+            "max_correlated_risk_pct": self.max_correlated_risk_pct,
+            "llm_prompt_version": self.llm_prompt_version,
+            "llm_model": self.llm_model,
+            "llm_temperature": self.llm_temperature,
             "version": self.version,
             "total_trades": self.total_trades,
             "win_count": self.win_count,
@@ -215,12 +293,61 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         
-        # Lightweight migration: add `symbols` column to strategy_configs if missing
-        def _migrate_strategy_symbols(sync_conn):
+        # Lightweight migration: add missing columns
+        def _migrate_all(sync_conn):
+            # strategy_configs columns
             cols = sync_conn.exec_driver_sql("PRAGMA table_info(strategy_configs)").fetchall()
-            if not any(c[1] == "symbols" for c in cols):
+            col_names = [c[1] for c in cols]
+            if "symbols" not in col_names:
                 sync_conn.exec_driver_sql("ALTER TABLE strategy_configs ADD COLUMN symbols TEXT DEFAULT '[]'")
-        await conn.run_sync(_migrate_strategy_symbols)
+            if "correlation_group" not in col_names:
+                sync_conn.exec_driver_sql("ALTER TABLE strategy_configs ADD COLUMN correlation_group TEXT DEFAULT 'CRYPTO_MAJOR'")
+            if "max_correlated_risk_pct" not in col_names:
+                sync_conn.exec_driver_sql("ALTER TABLE strategy_configs ADD COLUMN max_correlated_risk_pct REAL DEFAULT 3.0")
+            if "llm_prompt_version" not in col_names:
+                sync_conn.exec_driver_sql("ALTER TABLE strategy_configs ADD COLUMN llm_prompt_version TEXT DEFAULT 'v1'")
+            if "llm_model" not in col_names:
+                sync_conn.exec_driver_sql("ALTER TABLE strategy_configs ADD COLUMN llm_model TEXT")
+            if "llm_temperature" not in col_names:
+                sync_conn.exec_driver_sql("ALTER TABLE strategy_configs ADD COLUMN llm_temperature REAL DEFAULT 0.2")
+            
+            # trades columns
+            cols = sync_conn.exec_driver_sql("PRAGMA table_info(trades)").fetchall()
+            col_names = [c[1] for c in cols]
+            new_trade_cols = {
+                "lowest_price": "REAL",
+                "exit_reason_enum": "TEXT",
+                "structural_rr": "REAL",
+                "estimated_executable_rr": "REAL",
+                "executable_rr": "REAL",
+                "realized_r": "REAL",
+                "mfe": "REAL DEFAULT 0.0",
+                "mae": "REAL DEFAULT 0.0",
+                "mfe_r": "REAL DEFAULT 0.0",
+                "mae_r": "REAL DEFAULT 0.0",
+                "setup_id": "TEXT",
+                "correlation_group": "TEXT",
+                "initial_risk_usd": "REAL",
+                "risk_usd": "REAL",
+                "fees_estimate": "REAL",
+                "slippage_estimate": "REAL",
+                "llm_decision": "TEXT",
+                "llm_confidence": "REAL",
+                "llm_model": "TEXT",
+                "llm_reasoning": "TEXT",
+                "llm_prompt_version": "TEXT",
+                "rule_engine_decision": "TEXT",
+                "market_state_snapshot": "TEXT",
+                "confirmation_candle_timestamp": "TIMESTAMP",
+                "be_triggered": "BOOLEAN DEFAULT 0",
+                "be_timestamp": "TIMESTAMP",
+                "be_price": "REAL",
+            }
+            for col_name, col_type in new_trade_cols.items():
+                if col_name not in col_names:
+                    sync_conn.exec_driver_sql(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+        
+        await conn.run_sync(_migrate_all)
     
     # Initialize default strategies and paper balance if not existing
     async with AsyncSessionLocal() as session:
@@ -278,7 +405,12 @@ async def init_db():
                         "take_profit_pct": 3.0,
                         "trailing_stop_pct": 1.0,
                         "risk_amount_usd": 10.0
-                    })
+                    }),
+                    correlation_group="CRYPTO_MAJOR",
+                    max_correlated_risk_pct=3.0,
+                    llm_prompt_version="v1",
+                    llm_model="qwen/qwen3.8-27b",
+                    llm_temperature=0.2
                 ),
                 StrategyConfig(
                     name="ai_adaptive_momentum",
@@ -306,7 +438,12 @@ async def init_db():
                         "stop_loss_pct": 1.5,
                         "take_profit_pct": 3.0,
                         "trailing_stop_pct": 1.0
-                    })
+                    }),
+                    correlation_group="CRYPTO_MAJOR",
+                    max_correlated_risk_pct=3.0,
+                    llm_prompt_version="v1",
+                    llm_model="qwen/qwen3.8-27b",
+                    llm_temperature=0.2
                 ),
                 StrategyConfig(
                     name="bollinger_mean_reversion",
@@ -327,7 +464,12 @@ async def init_db():
                         "stop_loss_pct": 1.2,
                         "take_profit_pct": 2.4,
                         "trailing_stop_pct": 0.8
-                    })
+                    }),
+                    correlation_group="CRYPTO_MAJOR",
+                    max_correlated_risk_pct=3.0,
+                    llm_prompt_version="v1",
+                    llm_model="qwen/qwen3.8-27b",
+                    llm_temperature=0.2
                 ),
                 StrategyConfig(
                     name="grid_scalper",
@@ -345,7 +487,12 @@ async def init_db():
                         "risk_per_trade_pct": 1.0,
                         "stop_loss_pct": 2.5,
                         "take_profit_pct": 1.5
-                    })
+                    }),
+                    correlation_group="CRYPTO_MAJOR",
+                    max_correlated_risk_pct=3.0,
+                    llm_prompt_version="v1",
+                    llm_model="qwen/qwen3.8-27b",
+                    llm_temperature=0.2
                 )
             ]
             session.add_all(default_strategies)

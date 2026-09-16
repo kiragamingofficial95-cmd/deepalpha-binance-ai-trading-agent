@@ -174,6 +174,8 @@ class BotRunner:
 
     async def _handle_trade_signal(self, symbol: str, signal: dict[str, Any], strategy: Any):
         side = signal.get("action", "BUY").upper()
+        bias_dir = "bullish" if side == "BUY" else "bearish"
+        
         # Get strategy-specific risk settings (fallback to global settings)
         risk = json.loads(strategy.risk_settings) if strategy and strategy.risk_settings else {}
         max_open = int(risk.get("max_open_positions", settings.MAX_OPEN_POSITIONS))
@@ -181,14 +183,20 @@ class BotRunner:
         max_daily_trades = int(risk.get("max_daily_trades", 2))
         max_daily_losses = int(risk.get("max_daily_losses", 2))
         risk_amount = float(risk.get("risk_amount_usd", 0)) or None
+        
+        # Correlation settings from strategy
+        correlation_group = getattr(strategy, "correlation_group", "CRYPTO_MAJOR")
+        max_correlated_risk_pct = getattr(strategy, "max_correlated_risk_pct", 3.0)
 
-        # 1. Check risk manager validation with daily limits
+        # 1. Check risk manager validation with daily limits AND correlated risk
         risk_check = await risk_manager.can_open_trade(
             symbol=symbol,
             max_open_positions=max_open,
             max_daily_loss_pct=max_daily_loss,
             max_daily_trades=max_daily_trades,
-            max_daily_losses=max_daily_losses
+            max_daily_losses=max_daily_losses,
+            correlation_group=correlation_group,
+            max_correlated_risk_pct=max_correlated_risk_pct
         )
 
         if not risk_check["allowed"]:
@@ -207,6 +215,37 @@ class BotRunner:
         sl_pct = signal.get("stop_loss_pct", settings.DEFAULT_STOP_LOSS_PCT)
         tp_pct = signal.get("take_profit_pct", settings.DEFAULT_TAKE_PROFIT_PCT)
         trailing_pct = signal.get("trailing_stop_pct", 1.0)
+
+        # 3. Duplicate setup prevention
+        setup_id = signal.get("setup_id")
+        if setup_id:
+            async with AsyncSessionLocal() as session:
+                existing = await session.execute(
+                    select(Trade).where(Trade.setup_id == setup_id, Trade.status.in_(["OPEN", "CLOSED", "CANCELLED"]))
+                )
+                if existing.scalar_one_or_none():
+                    self.log_event("WARNING", f"{side} signal on {symbol} skipped: Duplicate setup {setup_id}")
+                    return
+
+        # 4. Rule engine decision (deterministic ICT rules) - record for LLM impact tracking
+        rule_engine_decision = "PASS"  # If we got here, rules passed
+        
+        # 5. LLM validation - only for ICT strategy
+        ict = signal.get("ict", {})
+        llm_decision = ict.get("llm_decision", "WAIT")
+        llm_confidence = ict.get("llm_confidence", 0.0)
+        llm_model = ict.get("llm_model", "")
+        llm_reasoning = ict.get("llm_reasoning", "")
+        llm_prompt_version = getattr(strategy, "llm_prompt_version", "v1")
+        
+        # LLM must NOT override hard risk controls - only PASS/FAIL/WAIT
+        if llm_decision == "FAIL":
+            self.log_event("WARNING", f"{side} signal on {symbol} rejected by LLM: {llm_reasoning}")
+            return
+        elif llm_decision == "WAIT":
+            self.log_event("INFO", f"{side} signal on {symbol} held by LLM: {llm_reasoning}")
+            return
+        # llm_decision == "PASS" or not present -> continue
 
         if self.trading_mode == "PAPER":
             balance = await paper_engine.get_balance("USDT")
@@ -232,12 +271,28 @@ class BotRunner:
                 stop_loss_pct=sl_pct,
                 take_profit_pct=tp_pct,
                 trailing_stop_pct=trailing_pct,
-                technical_snapshot=signal.get("indicators", {})
+                technical_snapshot=signal.get("indicators", {}),
+                # New tracking fields
+                structural_rr=signal.get("structural_rr"),
+                estimated_executable_rr=signal.get("estimated_executable_rr"),
+                setup_id=signal.get("setup_id"),
+                correlation_group=correlation_group,
+                initial_risk_usd=size_usdt * (sl_pct / 100.0),  # Approximate risk in USD
+                fees_estimate=size_usdt * 0.00075 * 2,  # Entry + exit fees
+                slippage_estimate=size_usdt * 0.0002 * 2,  # Entry + exit slippage
+                llm_decision=llm_decision,
+                llm_confidence=llm_confidence,
+                llm_model=llm_model,
+                llm_reasoning=llm_reasoning,
+                llm_prompt_version=llm_prompt_version,
+                rule_engine_decision=rule_engine_decision,
+                market_state_snapshot=signal.get("market_state_snapshot"),
+                confirmation_candle_timestamp=signal.get("confirmation_candle_timestamp"),
             )
 
             if res.get("success"):
                 trade = res["trade"]
-                self.log_event("INFO", f"OPENED PAPER {side} {symbol}: ${size_usdt:.2f} @ ${trade['entry_price']:.4f} (SL: ${trade['stop_loss'] or 0:.4f}, TP: ${trade['take_profit'] or 0:.4f})", meta=trade)
+                self.log_event("INFO", f"OPENED PAPER {side} {symbol}: ${size_usdt:.2f} @ ${trade['entry_price']:.4f} (SL: ${trade['stop_loss'] or 0:.4f}, TP: ${trade['take_profit'] or 0:.4f}, RR: {trade.get('executable_rr', 'N/A')})", meta=trade)
                 self.broadcast_event({"type": "TRADE_OPENED", "data": trade})
             else:
                 self.log_event("ERROR", f"Failed to open paper trade on {symbol}: {res.get('error')}")
@@ -286,7 +341,9 @@ class BotRunner:
                         strategy_name=strategy.name if strategy else "AI_Adaptive",
                         entry_reason=signal.get("reason", "Real Trading Signal"),
                         technical_snapshot=str(signal.get("indicators", {})),
-                        entry_time=datetime.datetime.utcnow()
+                        entry_time=datetime.datetime.utcnow(),
+                        correlation_group=correlation_group,
+                        initial_risk_usd=size_usdt * (sl_pct / 100.0),
                     )
                     session.add(trade)
                     await session.commit()

@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import json
 import logging
 from typing import Any, Optional
@@ -548,7 +549,8 @@ class StrategyEngine:
             "a_plus": a_plus,
             "rr_to_tp1": rr_ratio,
             "stop_loss": round(stop_loss, 4),
-            "tp1": round(tp1_price, 4)
+            "tp1": round(tp1_price, 4),
+            "structural_rr": rr_ratio,  # Store structural RR separately
         }
 
         # NO TRADE if A+ checklist fails OR RR < 2.0
@@ -575,10 +577,30 @@ class StrategyEngine:
         tp_distance_pct = round((reward_dist / price) * 100, 2) if price > 0 else tp_pct
         entry_model = "FLIP_EM" if entry_5m.get("confirmed") and entry_5m.get("mss", {}).get("shift") else "MS_EM"
 
+        # Generate setup ID for duplicate prevention
+        poi = poi_15m.get("poi", {})
+        setup_id = f"{symbol}_{strategy.name}_{bias_dir}_{poi.get('type','unknown')}_{int(poi.get('time', 0) or datetime.datetime.utcnow().timestamp())}_{int(price)}_{int(stop_loss)}_{int(tp1_price)}"
+
+        # Prepare market state snapshot for LLM and audit
+        market_state_snapshot = {
+            "4h": macro,
+            "1h": bias_1h,
+            "15m": poi_15m,
+            "5m": entry_5m,
+            "indicators_15m": ind_15m,
+            "a_plus": a_plus,
+            "structural_rr": rr_ratio,
+            "estimated_entry": price,
+            "estimated_sl": round(stop_loss, 4),
+            "estimated_tp": round(tp1_price, 4),
+        }
+
         # Query Groq AI LLM for ICT market reasoning confirmation
         llm_val = await ai_agent.evaluate_ict_setup_with_llm(symbol, ict_state)
         ict_state["llm_reasoning"] = llm_val.get("llm_reasoning", "")
         ict_state["llm_model"] = llm_val.get("model", "")
+        ict_state["llm_decision"] = llm_val.get("decision", "WAIT")
+        ict_state["llm_confidence"] = llm_val.get("confidence", 0.0)
         ai_comment = f" | AI Reasoning: {llm_val['llm_reasoning']}" if llm_val.get("llm_reasoning") else ""
 
         return {
@@ -597,7 +619,13 @@ class StrategyEngine:
             "entry_model": entry_model,
             "stop_loss_price": round(stop_loss, 4),
             "take_profit_price": round(tp1_price, 4),
-            "rr_ratio": rr_ratio
+            "rr_ratio": rr_ratio,
+            # New fields for tracking and validation
+            "structural_rr": rr_ratio,
+            "estimated_executable_rr": rr_ratio,  # Pre-fill estimate
+            "setup_id": setup_id,
+            "market_state_snapshot": market_state_snapshot,
+            "confirmation_candle_timestamp": datetime.datetime.utcnow(),
         }
 
     def _evaluate_adaptive_momentum(

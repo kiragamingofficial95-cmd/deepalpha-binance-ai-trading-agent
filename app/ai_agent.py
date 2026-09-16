@@ -869,21 +869,24 @@ class AIAgent:
         """
         Submits the computed ICT multi-timeframe structural data to Groq LLM for AI reasoning,
         validation, and execution confirmation according to the ICT playbook.
+        
+        Returns structured decision: PASS, FAIL, or WAIT with confidence and reasoning.
+        The LLM CANNOT modify risk parameters - it only validates the setup.
         """
         client = await self.get_client()
         if not client:
-            return {"confirmed": True, "llm_reasoning": "AI key not configured; algorithmic validation used"}
+            return {"decision": "PASS", "confidence": 0.5, "llm_reasoning": "AI key not configured; algorithmic validation used", "model": "none"}
 
+        # Compact prompt to fit token limits
         prompt = (
-            f"You are the DEEPALPHA ICT Market Mechanics AI Validator.\n"
-            f"Analyze this multi-timeframe setup for {symbol}:\n"
-            f"- 4H Macro: {json.dumps(ict_state.get('macro_4h', {}))}\n"
-            f"- 1H Bias & Structure: {json.dumps(ict_state.get('bias_1h', {}))}\n"
-            f"- 15M POI & Volume Profile: {json.dumps(ict_state.get('poi_15m', {}))}\n"
-            f"- 5M Entry & Liquidity/MSS: {json.dumps(ict_state.get('entry_5m', {}))}\n"
-            f"- A+ Checklist: {json.dumps(ict_state.get('a_plus', {}))}\n"
-            f"- Proposed Stop Loss: {ict_state.get('stop_loss')}, TP1: {ict_state.get('tp1')}, RR Ratio: {ict_state.get('rr_to_tp1')}\n\n"
-            f"Task: Based strictly on the ICT playbook rules, give a concise 2-sentence confirmation of this setup and explain why it qualifies."
+            f"Evaluate ICT setup for {symbol}:\n"
+            f"4H: {json.dumps(ict_state.get('macro_4h', {}))}\n"
+            f"1H: {json.dumps(ict_state.get('bias_1h', {}))}\n"
+            f"15M POI: {json.dumps(ict_state.get('poi_15m', {}))}\n"
+            f"5M Entry: {json.dumps(ict_state.get('entry_5m', {}))}\n"
+            f"A+ Checks: {json.dumps(ict_state.get('a_plus', {}))}\n"
+            f"SL: {ict_state.get('stop_loss')}, TP: {ict_state.get('tp1')}, RR: {ict_state.get('rr_to_tp1')}\n\n"
+            f"Return ONLY JSON: {{decision: PASS|FAIL|WAIT, confidence: 0.0-1.0, reasoning: str, concerns: [str]}}"
         )
 
         try:
@@ -895,14 +898,39 @@ class AIAgent:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=250,
-                temperature=0.2
+                max_tokens=400,
+                temperature=0.1,
+                response_format={"type": "json_object"}
             )
             content = resp.choices[0].message.content if resp.choices else ""
-            return {"confirmed": True, "llm_reasoning": content.strip(), "model": target_model}
+            
+            # Parse and validate JSON response
+            try:
+                result = json.loads(content)
+                decision = result.get("decision", "WAIT").upper()
+                if decision not in ("PASS", "FAIL", "WAIT"):
+                    decision = "WAIT"
+                confidence = float(result.get("confidence", 0.0))
+                confidence = max(0.0, min(1.0, confidence))
+                reasoning = str(result.get("reasoning", ""))
+                concerns = result.get("concerns", [])
+                if not isinstance(concerns, list):
+                    concerns = [str(concerns)]
+                
+                return {
+                    "decision": decision,
+                    "confidence": confidence,
+                    "llm_reasoning": reasoning,
+                    "concerns": concerns,
+                    "model": target_model
+                }
+            except json.JSONDecodeError:
+                logger.warning(f"LLM returned invalid JSON: {content}")
+                return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": "Invalid JSON response from LLM", "model": target_model}
+                
         except Exception as e:
             logger.warning(f"Groq ICT LLM validation warning: {e}")
-            return {"confirmed": True, "llm_reasoning": f"Algorithmic ICT rule confirmed"}
+            return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": f"LLM error: {str(e)}", "model": "error"}
 
 
 ai_agent = AIAgent()

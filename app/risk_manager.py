@@ -117,10 +117,12 @@ class RiskManager:
         max_open_positions: int = 5,
         max_daily_loss_pct: float = 5.0,
         max_daily_trades: int = 2,
-        max_daily_losses: int = 2
+        max_daily_losses: int = 2,
+        correlation_group: str = "CRYPTO_MAJOR",
+        max_correlated_risk_pct: float = 3.0
     ) -> dict[str, Any]:
         """
-        Runs comprehensive pre-trade validation checks.
+        Runs comprehensive pre-trade validation checks including correlated risk tracking.
         """
         # 1. Circuit breaker check
         dd_check = await self.check_daily_drawdown(max_daily_loss_pct)
@@ -155,6 +157,30 @@ class RiskManager:
                     "allowed": False,
                     "reason": f"Active position already open for {symbol} (#{existing_symbol_trade.id})"
                 }
+                
+            # 5. Check correlated risk exposure
+            if correlation_group:
+                bal_res = await session.execute(select(PaperBalance).where(PaperBalance.asset == "USDT"))
+                usdt_bal = bal_res.scalar_one_or_none()
+                total_equity = usdt_bal.free if usdt_bal else 10000.0
+                
+                max_allowed_usd = total_equity * (max_correlated_risk_pct / 100.0)
+                
+                # Sum current risk in this group
+                current_group_risk_usd = sum(
+                    t.risk_usd or 0.0
+                    for t in open_trades 
+                    if getattr(t, "correlation_group", None) == correlation_group
+                )
+                
+                # We can't know the exact risk of the *new* trade here yet without passing it, 
+                # but we can check if the group is already at/over capacity.
+                # A more precise check is done post-sizing, but this acts as an early gate.
+                if current_group_risk_usd >= max_allowed_usd * 0.95: # 95% threshold buffer
+                    return {
+                        "allowed": False,
+                        "reason": f"Correlated risk for group {correlation_group} is at capacity (${current_group_risk_usd:.2f} >= max ${max_allowed_usd:.2f})"
+                    }
 
         return {"allowed": True, "reason": "Pre-trade risk criteria satisfied", "daily": daily_check}
 
