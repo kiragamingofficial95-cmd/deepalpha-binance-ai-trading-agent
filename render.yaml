@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: deepalpha-trading-agent
+    runtime: docker
+    dockerfilePath: Dockerfile
+    plan: standard
+    region: oregon
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ENV
+        value: production
+      - key: TRADING_MODE
+        value: PAPER
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: SCAN_INTERVAL_SECONDS
+        value: 15
+      - key: MAX_OPEN_POSITIONS
+        value: 5
+      - key: RISK_PER_TRADE_PERCENT
+        value: 2.0
+      - key: MAX_DAILY_LOSS_PERCENT
+        value: 5.0
+      - key: DEFAULT_STOP_LOSS_PCT
+        value: 1.5
+      - key: DEFAULT_TAKE_PROFIT_PCT
+        value: 3.0
+    disk:
+      name: trading-agent-data
+      mountPath: /app/data
+      sizeGB: 1
