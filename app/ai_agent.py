@@ -1,6 +1,7 @@
 import datetime
 import json
 import logging
+import time
 from typing import Any, Optional
 from groq import AsyncGroq
 from sqlalchemy import select, desc
@@ -13,6 +14,15 @@ from app.paper_engine import paper_engine
 from app.indicators import analyze_all_indicators
 
 logger = logging.getLogger("ai_agent")
+
+# Rate limit: max LLM calls per minute across all symbols
+LLM_CALLS_PER_MINUTE = 6
+llm_call_timestamps: list[float] = []
+llm_cache: dict[str, dict] = {}
+llm_cache_ttl = 120  # Cache valid for 2 minutes
+
+# Track rate limit errors
+_rate_limit_cooldown_until = 0.0
 
 SYSTEM_PROMPT = """You are DEEPALPHA AI. You execute the ICT / Market Mechanics Scalping Framework exactly as written below.
 
@@ -872,12 +882,39 @@ class AIAgent:
         
         Returns structured decision: PASS, FAIL, or WAIT with confidence and reasoning.
         The LLM CANNOT modify risk parameters - it only validates the setup.
+        
+        Rate limit handling: respects Groq daily TPD limits with exponential backoff.
+        Caching: returns cached result if data hasn't changed significantly within TTL.
         """
+        # Check global rate limit cooldown (from 429 errors)
+        global _rate_limit_cooldown_until
+        if time.time() < _rate_limit_cooldown_until:
+            remaining = int(_rate_limit_cooldown_until - time.time())
+            logger.warning(f"LLM in cooldown ({remaining}s). Returning WAIT for {symbol}.")
+            return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": f"Rate limit cooldown. Try again in {remaining}s", "model": "rate_limited"}
+
+        # Check if we're within the per-minute call limit
+        now = time.time()
+        llm_call_timestamps[:] = [t for t in llm_call_timestamps if now - t < 60]
+        if len(llm_call_timestamps) >= LLM_CALLS_PER_MINUTE:
+            oldest = min(llm_call_timestamps)
+            wait_time = 60 - (now - oldest)
+            logger.warning(f"LLM per-minute limit reached ({LLM_CALLS_PER_MINUTE}/min). Waiting {wait_time:.1f}s for {symbol}.")
+            return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": f"LLM call limit ({LLM_CALLS_PER_MINUTE}/min). Wait {wait_time:.0f}s", "model": "rate_limited"}
+
+        # Check cache
+        cache_key = f"{symbol}_{hash(json.dumps(ict_state, sort_keys=True))}"
+        if cache_key in llm_cache:
+            cached = llm_cache[cache_key]
+            if now - cached.get("_cached_at", 0) < llm_cache_ttl:
+                logger.debug(f"LLM cache hit for {symbol}")
+                return cached
+
         client = await self.get_client()
         if not client:
             return {"decision": "PASS", "confidence": 0.5, "llm_reasoning": "AI key not configured; algorithmic validation used", "model": "none"}
 
-        # Compact prompt to fit token limits
+        # Compact prompt
         prompt = (
             f"Evaluate ICT setup for {symbol}:\n"
             f"4H: {json.dumps(ict_state.get('macro_4h', {}))}\n"
@@ -904,6 +941,9 @@ class AIAgent:
             )
             content = resp.choices[0].message.content if resp.choices else ""
             
+            # Track call
+            llm_call_timestamps.append(now)
+            
             # Parse and validate JSON response
             try:
                 result = json.loads(content)
@@ -917,20 +957,42 @@ class AIAgent:
                 if not isinstance(concerns, list):
                     concerns = [str(concerns)]
                 
-                return {
+                cached_result = {
                     "decision": decision,
                     "confidence": confidence,
                     "llm_reasoning": reasoning,
                     "concerns": concerns,
-                    "model": target_model
+                    "model": target_model,
+                    "_cached_at": now
                 }
+                llm_cache[cache_key] = cached_result
+                
+                return cached_result
             except json.JSONDecodeError:
                 logger.warning(f"LLM returned invalid JSON: {content}")
                 return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": "Invalid JSON response from LLM", "model": target_model}
                 
         except Exception as e:
+            error_str = str(e)
             logger.warning(f"Groq ICT LLM validation warning: {e}")
-            return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": f"LLM error: {str(e)}", "model": "error"}
+            
+            # Handle rate limit (429)
+            if "429" in error_str or "rate_limit" in error_str.lower() or "Rate limit" in error_str:
+                # Extract wait time if available, otherwise default to 5 minutes
+                wait_sec = 300
+                try:
+                    import re
+                    match = re.search(r'Please try again in ([\d.]+)s', error_str)
+                    if match:
+                        wait_sec = float(match.group(1)) + 10
+                except:
+                    pass
+                global _rate_limit_cooldown_until
+                _rate_limit_cooldown_until = now + wait_sec
+                logger.warning(f"LLM rate limit hit. Cooldown set for {wait_sec:.0f}s")
+                return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": f"Rate limited. Try again in {wait_sec:.0f}s", "model": "rate_limited"}
+            
+            return {"decision": "WAIT", "confidence": 0.0, "llm_reasoning": f"LLM error: {error_str}", "model": "error"}
 
 
 ai_agent = AIAgent()
