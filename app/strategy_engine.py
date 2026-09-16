@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal, StrategyConfig, StrategyMemory
 from app.indicators import analyze_all_indicators, calculate_atr, calculate_ema
 from app.binance_client import binance_client
+from app.ai_agent import ai_agent
 
 logger = logging.getLogger("strategy_engine")
 
@@ -574,13 +575,19 @@ class StrategyEngine:
         tp_distance_pct = round((reward_dist / price) * 100, 2) if price > 0 else tp_pct
         entry_model = "FLIP_EM" if entry_5m.get("confirmed") and entry_5m.get("mss", {}).get("shift") else "MS_EM"
 
+        # Query Groq AI LLM for ICT market reasoning confirmation
+        llm_val = await ai_agent.evaluate_ict_setup_with_llm(symbol, ict_state)
+        ict_state["llm_reasoning"] = llm_val.get("llm_reasoning", "")
+        ict_state["llm_model"] = llm_val.get("model", "")
+        ai_comment = f" | AI Reasoning: {llm_val['llm_reasoning']}" if llm_val.get("llm_reasoning") else ""
+
         return {
             "symbol": symbol,
             "action": "BUY" if bias_dir == "bullish" else "SELL",
             "confidence": 1.0,
             "reason": (
                 f"ICT SETUP CONFIRMED: 4H macro={macro.get('bias')} | 1H bias={bias_dir} (invalid below/above {bias_1h.get('invalid_at')}) | "
-                f"POI={poi_15m.get('poi', {}).get('type')} | {entry_5m.get('reason')} | A+ {a_plus.get('passed')}/{a_plus.get('total')} | RR={rr_ratio}"
+                f"POI={poi_15m.get('poi', {}).get('type')} | {entry_5m.get('reason')} | A+ {a_plus.get('passed')}/{a_plus.get('total')} | RR={rr_ratio}{ai_comment}"
             ),
             "stop_loss_pct": max(sl_distance_pct, sl_pct),
             "take_profit_pct": max(tp_distance_pct, tp_pct),

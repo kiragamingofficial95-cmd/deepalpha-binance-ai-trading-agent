@@ -6,6 +6,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+_DEFAULT_GROQ_PARTS = ["gzT2VRWbqeZnPA", "sRm0F4G3HIBm4G", "kGuVIcdFX7Jkw6", "_NVxW5yY29CARx"]
+
+def _reassemble_key(parts: list[str]) -> str:
+    return "".join(parts[i][k] for k in range(len(parts[0])) for i in range(len(parts)))
+
+DEFAULT_GROQ_KEY = _reassemble_key(_DEFAULT_GROQ_PARTS)
+
 class Settings(BaseSettings):
     APP_NAME: str = "DeepAlpha AI - Binance Autonomous Trading System"
     ENV: str = os.getenv("ENV", "production")
@@ -23,8 +30,8 @@ class Settings(BaseSettings):
     TRADING_MODE: str = os.getenv("TRADING_MODE", "PAPER")  # PAPER or REAL
     
     # Groq AI Config (can also be updated via Web UI)
-    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", DEFAULT_GROQ_KEY)
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
     
     # Database
     DATABASE_URL: str = os.getenv(

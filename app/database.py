@@ -224,6 +224,24 @@ async def init_db():
     
     # Initialize default strategies and paper balance if not existing
     async with AsyncSessionLocal() as session:
+        # Check Groq API key setting
+        gk_res = await session.execute(select(SettingKV).where(SettingKV.key == "GROQ_API_KEY"))
+        gk_row = gk_res.scalar_one_or_none()
+        if not gk_row or not gk_row.value:
+            if gk_row:
+                gk_row.value = settings.GROQ_API_KEY
+            else:
+                session.add(SettingKV(key="GROQ_API_KEY", value=settings.GROQ_API_KEY))
+
+        gm_res = await session.execute(select(SettingKV).where(SettingKV.key == "GROQ_MODEL"))
+        gm_row = gm_res.scalar_one_or_none()
+        if not gm_row or not gm_row.value:
+            if gm_row:
+                gm_row.value = settings.GROQ_MODEL
+            else:
+                session.add(SettingKV(key="GROQ_MODEL", value=settings.GROQ_MODEL))
+        await session.commit()
+
         # Check USDT balance
         res = await session.execute(select(PaperBalance).where(PaperBalance.asset == "USDT"))
         if not res.scalar_one_or_none():
