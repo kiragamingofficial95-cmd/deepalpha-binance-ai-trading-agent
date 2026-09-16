@@ -10,6 +10,8 @@ class DashboardApp {
         this.activeTab = "terminal";
         this.watchlist = [];
         this._strategiesFetched = false;
+        this.reconnectAttempts = 0;
+        this._wsReconnectTimer = null;
 
         this.init();
     }
@@ -140,6 +142,10 @@ class DashboardApp {
     }
 
     setupWebSocket() {
+        if (this._wsReconnectTimer) {
+            clearTimeout(this._wsReconnectTimer);
+            this._wsReconnectTimer = null;
+        }
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -148,6 +154,7 @@ class DashboardApp {
 
             this.socket.onopen = () => {
                 console.log("[WS] Connected to live trade stream");
+                this.reconnectAttempts = 0;
                 this.updateWsStatus(true);
             };
 
@@ -161,17 +168,23 @@ class DashboardApp {
             };
 
             this.socket.onclose = () => {
-                console.warn("[WS] Disconnected, attempting reconnect in 3s...");
+                console.warn("[WS] Disconnected, attempting reconnect...");
+                this.reconnectAttempts = (this.reconnectAttempts || 0) + 1;
+                const delay = Math.min(3000 * Math.pow(1.5, this.reconnectAttempts - 1), 30000);
                 this.updateWsStatus(false);
-                setTimeout(() => this.setupWebSocket(), 3000);
+                this._wsReconnectTimer = setTimeout(() => this.setupWebSocket(), delay);
             };
 
             this.socket.onerror = (err) => {
                 console.error("[WS] Error:", err);
+                this.reconnectAttempts = (this.reconnectAttempts || 0) + 1;
                 this.updateWsStatus(false);
             };
         } catch (e) {
             console.error("Failed to connect WS:", e);
+            this.reconnectAttempts = (this.reconnectAttempts || 0) + 1;
+            const delay = Math.min(3000 * Math.pow(1.5, this.reconnectAttempts - 1), 30000);
+            this._wsReconnectTimer = setTimeout(() => this.setupWebSocket(), delay);
         }
     }
 
@@ -182,8 +195,11 @@ class DashboardApp {
                 badge.className = "flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs bg-emerald-950/60 border border-emerald-500/30 text-emerald-400";
                 badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span><span>LIVE STREAM</span>`;
             } else {
-                badge.className = "flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs bg-red-950/60 border border-red-500/30 text-red-400";
-                badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-red-400"></span><span>RECONNECTING</span>`;
+                const attempts = this.reconnectAttempts || 1;
+                const delay = Math.min(3000 * Math.pow(1.5, attempts - 1), 30000);
+                const delaySec = (delay / 1000).toFixed(0);
+                badge.className = "flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-xs bg-amber-950/60 border border-amber-500/30 text-amber-400";
+                badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span><span>RECONNECTING (${attempts}) in ${delaySec}s</span>`;
             }
         }
     }
