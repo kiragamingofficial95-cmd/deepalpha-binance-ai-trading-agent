@@ -725,6 +725,12 @@ class AIAgent:
                     })
 
                 messages = self._compact_messages(messages)
+                # Strip tool_calls from assistant message so the model
+                # cannot attempt further tool calls on the summary turn.
+                for msg in messages:
+                    if isinstance(msg, dict) and msg.get("role") == "assistant" and "tool_calls" in msg:
+                        msg["tool_calls"] = []
+                        msg["content"] = msg.get("content") or "Task completed."
                 second_response = await client.chat.completions.create(
                     model=current_model,
                     messages=messages,
