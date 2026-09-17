@@ -728,6 +728,7 @@ class AIAgent:
                 second_response = await client.chat.completions.create(
                     model=current_model,
                     messages=messages,
+                    tool_choice="none",
                     temperature=0.3,
                     max_tokens=settings.GROQ_MAX_TOKENS
                 )
@@ -986,6 +987,7 @@ class AIAgent:
                     ],
                     max_tokens=400,
                     temperature=0.1,
+                    tool_choice="none",
                     response_format={"type": "json_object"}
                 ),
                 timeout=settings.LLM_VALIDATION_TIMEOUT_SECONDS
