@@ -107,6 +107,7 @@ class BotRunner:
             try:
                 async with self._cycle_lock:
                     await self._execute_cycle()
+                self._cycle_errors = 0  # Reset only on success
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -116,8 +117,12 @@ class BotRunner:
                     self.log_event("CRITICAL", f"Too many consecutive cycle errors ({self._cycle_errors}). Stopping bot.")
                     self.is_running = False
                     break
-            finally:
-                self._cycle_errors = 0
+                else:
+                    # Exponential backoff: wait longer after each error
+                    backoff = min(2 ** (self._cycle_errors - 1), 30)
+                    self.log_event("WARNING", f"Cycle error #{self._cycle_errors}. Backoff {backoff}s before retry.")
+                    await asyncio.sleep(backoff)
+                    continue
             
             await asyncio.sleep(self.scan_interval)
 
