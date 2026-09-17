@@ -1,0 +1,22 @@
+[
+  "tests/test_api.py::test_api_endpoints",
+  "tests/test_system.py::test_a_plus_checklist_conditions",
+  "tests/test_system.py::test_correlated_portfolio_risk",
+  "tests/test_system.py::test_correlated_risk",
+  "tests/test_system.py::test_database_init",
+  "tests/test_system.py::test_database_isolation",
+  "tests/test_system.py::test_duplicate_setup_protection",
+  "tests/test_system.py::test_duplicate_setup_restart_safety",
+  "tests/test_system.py::test_e2e_full_pipeline",
+  "tests/test_system.py::test_imports_and_compile",
+  "tests/test_system.py::test_llm_adversarial_unauthorized_fields",
+  "tests/test_system.py::test_llm_validation",
+  "tests/test_system.py::test_observability_reason_codes",
+  "tests/test_system.py::test_paper_execution",
+  "tests/test_system.py::test_post_fill_rr_rejection",
+  "tests/test_system.py::test_rr_separate_tracking",
+  "tests/test_system.py::test_rr_validation",
+  "tests/test_system.py::test_stale_data_protection",
+  "tests/test_system.py::test_synthetic_data_protection",
+  "tests/test_system.py::test_trade_persistence"
+]

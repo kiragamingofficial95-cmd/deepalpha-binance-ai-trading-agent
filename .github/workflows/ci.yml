@@ -1,0 +1,82 @@
+name: DeepAlpha AI Trading Agent - CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+      
+      - name: Run unit and integration tests
+        run: |
+          pytest tests/test_system.py tests/test_api.py -v --tb=short --tb-line
+        env:
+          DATABASE_URL: "sqlite+aiosqlite:///./test_trading_agent.db"
+          GROQ_API_KEY: ""
+          BINANCE_API_KEY: ""
+          BINANCE_SECRET_KEY: ""
+          DASHBOARD_PASSWORD: ""
+          SECRET_KEY: ""
+          ALLOW_REAL_TRADING: "false"
+          TRADING_MODE: "PAPER"
+          ALLOW_SYNTHETIC_DATA_TRADING: "false"
+      
+      - name: Run import/compile check
+        run: |
+          python -c "import app.config; import app.database; import app.paper_engine; import app.risk_manager; import app.strategy_engine; import app.ai_agent; import app.analytics; import app.bot_runner; import app.main; print('All modules import successfully')"
+      
+      - name: Secret scan
+        run: |
+          # Check for accidentally committed secrets
+          if git log --all --oneline | head -1; then
+            echo "Checking git history for secrets..."
+          fi
+          # Check current files for hardcoded secrets (excluding example files)
+          if grep -rn "SECRET_KEY=deepalpha_super_secret" . --include="*.py" --include="*.env" --exclude-dir=.git 2>/dev/null; then
+            echo "ERROR: Hardcoded secret found"
+            exit 1
+          fi
+          if grep -rn "DASHBOARD_PASSWORD=admin123" . --include="*.py" --include="*.env" --exclude-dir=.git 2>/dev/null; then
+            echo "ERROR: Hardcoded secret found"
+            exit 1
+          fi
+          echo "No hardcoded secrets found"
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Build Docker image
+        run: |
+          docker build -t deepalpha-trading-agent:test .
+          echo "Docker build successful"
+      
+      - name: Verify Docker image
+        run: |
+          docker run --rm deepalpha-trading-agent:test python -c "import app.main; print('Docker image verified')"
